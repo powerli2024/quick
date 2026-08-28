@@ -74,8 +74,31 @@ def _split_cmd(template: str) -> list[str]:
     return shlex.split(template, posix=os.name != "nt")
 
 
+def _render_command(
+    template: str,
+    *,
+    manifest: Path,
+    output: Path,
+    selected_dir: Path | None = None,
+) -> str:
+    """Substitute only the documented placeholders in a sidecar command.
+
+    ``str.format`` is intentionally avoided: callers may need literal braces
+    for Python snippets, JSON, or shell expansions inside their command.
+    """
+    values = {
+        "manifest": str(manifest),
+        "output": str(output),
+        "selected_dir": str(selected_dir or ""),
+    }
+    rendered = template
+    for name, value in values.items():
+        rendered = rendered.replace("{" + name + "}", value)
+    return rendered
+
+
 def _run_sidecar_command(template: str, *, manifest: Path, output: Path, selected_dir: Path | None = None) -> Path:
-    rendered = template.format(manifest=str(manifest), output=str(output), selected_dir=str(selected_dir or ""))
+    rendered = _render_command(template, manifest=manifest, output=output, selected_dir=selected_dir)
     subprocess.run(_split_cmd(rendered), check=True)
     if not output.is_file():
         raise RuntimeError(f"external command did not create declared output: {output}")

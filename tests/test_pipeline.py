@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 from quick.export import group_orders, safe_slug, uid_hash
-from quick.pipeline import RunConfig, run
+from quick.pipeline import RunConfig, _render_command, run
 from quick.validate import validate_review_flat
 
 from helpers import make_pos_neg
@@ -21,6 +21,18 @@ def test_group_prefix_is_stable():
     assert orders["neg\0neg_2"] == 3
     assert uid_hash("pos", "pos_0001") == uid_hash("pos", "pos_0001")
     assert safe_slug("neg_1005cer") == "neg_1005cer"
+
+
+def test_sidecar_template_preserves_literal_braces(tmp_path: Path):
+    template = "python -c \"print('{literal}')\" --manifest {manifest} --output {output}"
+    rendered = _render_command(
+        template,
+        manifest=tmp_path / "manifest.jsonl",
+        output=tmp_path / "out.jsonl",
+    )
+    assert "{literal}" in rendered
+    assert "{manifest}" not in rendered
+    assert "{output}" not in rendered
 
 
 def test_spectral_pipeline_never_production_approved(tmp_path: Path):

@@ -4,6 +4,12 @@
 set -euo pipefail
 export TRANSFORMERS_VERBOSITY="${TRANSFORMERS_VERBOSITY:-error}"
 
+# Some AutoDL images inherit an invalid OMP_NUM_THREADS value.  libgomp emits
+# an error before Python starts, so normalize it to a safe integer.
+if [[ ! "${OMP_NUM_THREADS:-}" =~ ^[1-9][0-9]*$ ]]; then
+  export OMP_NUM_THREADS=1
+fi
+
 REPO_DIR="${REPO_DIR:-/root/quick}"
 KWS_DIR="${KWS_DIR:-/root/kws}"
 KWS_SRC="${KWS_SRC:-$KWS_DIR/src}"
@@ -96,6 +102,11 @@ fi
 
 status=0
 "${args[@]}" || status=$?
+
+if [[ ! -f "$WORK_DIR/report.json" ]]; then
+  echo "[ERR] quick pipeline failed before report.json was written (status=$status)" >&2
+  exit "${status:-1}"
+fi
 
 python - "$WORK_DIR/report.json" "$EXPECTED_UIDS" <<'PY'
 import json, sys
