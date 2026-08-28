@@ -80,3 +80,42 @@ def test_raw_preferred_on_stage_tie():
     result = route_uid([moss, raw], RoutePolicy())
     assert result["selected"]["view"] == "raw"
     assert result["s1_view_reason_code"] == "RAW_CONSERVATIVE_TIE"
+
+
+def test_stage_margin_keeps_raw_when_nll_gain_below_threshold():
+    from quick.route import stage_winner
+
+    raw = _row(cer_route=0.1, view="raw", nll=1.0, pcm_sha256="r")
+    moss = _row(
+        candidate_id="C-pos-u-s1-moss48k-original",
+        view="moss48k",
+        cer_route=0.1,
+        nll=0.999,
+        pcm_sha256="m",
+    )
+    winner, meta = stage_winner([raw, moss], "s1", RoutePolicy(nll_switch_margin=0.01))
+    assert winner["view"] == "raw"
+    assert meta["view_reason_code"] == "RAW_CONSERVATIVE_TIE"
+
+
+def test_stage_margin_allows_moss_when_nll_gain_meets_threshold():
+    from quick.route import stage_winner
+
+    raw = _row(cer_route=0.1, view="raw", nll=1.0, pcm_sha256="r")
+    moss = _row(
+        candidate_id="C-pos-u-s1-moss48k-original",
+        view="moss48k",
+        cer_route=0.1,
+        nll=0.98,
+        pcm_sha256="m",
+    )
+    winner, meta = stage_winner([raw, moss], "s1", RoutePolicy(nll_switch_margin=0.01))
+    assert winner["view"] == "moss48k"
+    assert meta["view_reason_code"] == "MOSS_EQUAL_CER_NLL_GAIN"
+
+
+def test_audit_fallback_requires_finite_cer():
+    bad = _row(validity="fatal_invalid", cer_route=None, decode_ok=True)
+    result = route_uid([bad], RoutePolicy())
+    assert result["ok"] is False
+    assert result["reason_code"] == "FAIL_NO_DECODABLE_S1"

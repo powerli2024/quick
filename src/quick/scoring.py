@@ -17,20 +17,66 @@ def finite(value: Any) -> float | None:
     return result if math.isfinite(result) else None
 
 
-def _lookup_keys(row: dict[str, Any]) -> list[str]:
-    keys = []
-    for key in (
-        "candidate_id", "score_key", "pcm_sha256", "audio_sha256",
-        "canonical_id", "file_sha256", "path", "wav", "source_wav",
-    ):
-        value = row.get(key)
-        if value is not None and str(value):
-            keys.append(str(value))
-    return keys
+_IDENTITY_FIELDS = frozenset({
+    "candidate_id", "path", "wav", "source_wav", "input", "output", "role", "arm",
+    "stream", "view", "uid", "split", "group_key", "dest_rel", "export_name", "slot",
+    "is_selected", "score_key",
+})
+_BIND_FIELDS = ("pcm_sha256", "wake_text", "lang")
+_FEATURE_COMPARE = (
+    "hyp", "text", "transcript", "nll", "q_kw", "token_count", "score_kind",
+    "embedding", "vector", "speaker_ref_score", "cos_to_ref",
+    "p_music", "p_overlap", "dnsmos_sig", "dnsmos_bak", "dnsmos_ovrl",
+    "pcm_sha256", "audio_sha256", "wake_text", "lang",
+)
+
+
+def _pcm_of(row: dict[str, Any]) -> str | None:
+    value = row.get("pcm_sha256") or row.get("canonical_id") or row.get("audio_sha256")
+    return str(value) if value else None
 
 
 def score_key(row: dict[str, Any]) -> str:
-    return json_hash([row.get("pcm_sha256") or row.get("canonical_id"), row.get("wake_text"), row.get("lang")])
+    return json_hash([_pcm_of(row), row.get("wake_text"), row.get("lang")])
+
+
+def _lookup_keys(row: dict[str, Any]) -> list[str]:
+    keys: list[str] = []
+    if row.get("candidate_id"):
+        keys.append(f"id:{row['candidate_id']}")
+    pcm = _pcm_of(row)
+    wake, lang = row.get("wake_text"), row.get("lang")
+    if pcm and wake is not None and lang:
+        keys.append(f"asr:{json_hash([pcm, str(wake), str(lang)])}")
+    elif pcm:
+        keys.append(f"pcm:{pcm}")
+    if row.get("score_key"):
+        keys.append(f"score:{row['score_key']}")
+    for field in ("path", "wav", "source_wav"):
+        if row.get(field):
+            keys.append(f"path:{row[field]}")
+    return keys
+
+
+def _compatible(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    for key in _FEATURE_COMPARE:
+        if key in left and key in right and left[key] != right[key]:
+            return False
+    return True
+
+
+def _assert_bind(stored: dict[str, Any], query: dict[str, Any]) -> None:
+    s_pcm, q_pcm = _pcm_of(stored), _pcm_of(query)
+    if s_pcm and q_pcm and s_pcm != q_pcm:
+        raise ValueError(
+            f"sidecar pcm mismatch stored={s_pcm} query={q_pcm} candidate={query.get('candidate_id')}"
+        )
+    for field in ("wake_text", "lang"):
+        stored_v, query_v = stored.get(field), query.get(field)
+        if stored_v not in (None, "") and query_v not in (None, "") and str(stored_v) != str(query_v):
+            raise ValueError(
+                f"sidecar {field} mismatch stored={stored_v!r} query={query_v!r} candidate={query.get('candidate_id')}"
+            )
 
 
 def load_sidecar(path: str | Path | None) -> dict[str, dict[str, Any]]:
@@ -43,17 +89,31 @@ def load_sidecar(path: str | Path | None) -> dict[str, dict[str, Any]]:
         if not keys:
             raise ValueError(f"sidecar row has no key: {path}")
         for key in keys:
-            if key in out and out[key] != row:
+            if key in out and not _compatible(out[key], row):
                 raise ValueError(f"conflicting sidecar records for {key}: {path}")
-            out[key] = row
+            if key not in out:
+                out[key] = row
     return out
 
 
 def find_sidecar(side: dict[str, dict[str, Any]], row: dict[str, Any]) -> dict[str, Any] | None:
+    found = None
     for key in _lookup_keys(row):
         if key in side:
-            return side[key]
-    return None
+            found = side[key]
+            break
+    if found is None:
+        sk = row.get("score_key")
+        if sk and f"score:{sk}" in side:
+            found = side[f"score:{sk}"]
+        elif sk and sk in side:
+            found = side[sk]
+    if found is None and row.get("candidate_id") and str(row["candidate_id"]) in side:
+        found = side[str(row["candidate_id"])]
+    if found is None:
+        return None
+    _assert_bind(found, row)
+    return found
 
 
 def cosine(a: Any, b: Any) -> float | None:
@@ -104,12 +164,6 @@ def _merge_quality(can_metrics: dict[str, Any] | None, noise: dict[str, Any]) ->
     return metrics
 
 
-def _candidate_key_local(row: dict[str, Any]) -> tuple[Any, ...]:
-    from .route import candidate_key
-
-    return candidate_key(row)
-
-
 def score_rows(
     rows: list[dict[str, Any]],
     registry: dict[str, Any],
@@ -123,6 +177,7 @@ def score_rows(
     allow_missing_asr: bool = False,
     qkw_calibrated: bool = False,
     feature_dir: str | Path | None = None,
+    policy: Any = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     asr = load_sidecar(asr_sidecar)
     nll = load_sidecar(nll_sidecar)
@@ -242,7 +297,7 @@ def score_rows(
             row.setdefault("cos_se_raw", None)
             row.setdefault("gain_ref", None)
 
-    _assign_ranks(scored)
+    _assign_ranks(scored, policy)
     meta = {
         "n_rows": len(scored),
         "n_unique_pcm": len({r.get("canonical_id") for r in scored if r.get("canonical_id")}),
@@ -267,18 +322,28 @@ def score_rows(
     return scored, meta
 
 
-def _assign_ranks(rows: list[dict[str, Any]]) -> None:
+def _assign_ranks(rows: list[dict[str, Any]], policy: Any = None) -> None:
+    from .route import RoutePolicy, stage_winner
+
+    policy = policy or RoutePolicy()
     by_group_role: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         by_group_role[(str(row.get("group_key")), str(row.get("role")))].append(row)
-    for group_rows in by_group_role.values():
-        rankable = [r for r in group_rows if r.get("validity") == "rankable" and finite(r.get("cer_route")) is not None]
-        ordered = sorted(rankable, key=_candidate_key_local)
-        cer_ordered = sorted(rankable, key=lambda r: (float(r["cer_route"]), str(r["candidate_id"])))
-        cer_rank = {r["candidate_id"]: i for i, r in enumerate(cer_ordered, 1)}
-        for i, row in enumerate(ordered, 1):
-            row["stage_rank"] = i
-            row["cer_rank"] = cer_rank[row["candidate_id"]]
+    for (_, role), group_rows in by_group_role.items():
+        rankable_rows = [r for r in group_rows if r.get("validity") == "rankable" and finite(r.get("cer_route")) is not None]
+        remaining = list(rankable_rows)
+        rank = 1
+        while remaining:
+            winner, _ = stage_winner(remaining, role, policy)
+            if winner is None:
+                break
+            winner_row = next(r for r in remaining if r["candidate_id"] == winner["candidate_id"])
+            winner_row["stage_rank"] = rank
+            remaining = [r for r in remaining if r["candidate_id"] != winner["candidate_id"]]
+            rank += 1
+        cer_ordered = sorted(rankable_rows, key=lambda r: (float(r["cer_route"]), str(r["candidate_id"])))
+        for i, row in enumerate(cer_ordered, 1):
+            row["cer_rank"] = i
         for row in group_rows:
             row.setdefault("stage_rank", None)
             row.setdefault("cer_rank", None)

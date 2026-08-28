@@ -387,6 +387,10 @@ def export_flat(
     write_json(root / "ZZZZZZ__EXPORT_SUMMARY.json", summary)
     if selected_only_dir is not None and not failures:
         dest_root = Path(selected_only_dir)
+        # Wipe previous selected-only tree so reused work dirs cannot leave stale UID WAVs.
+        if dest_root.exists():
+            shutil.rmtree(dest_root)
+        dest_root.mkdir(parents=True, exist_ok=True)
         selected_index: list[dict[str, Any]] = []
         for item in selected_rows:
             selected = item["selected"]

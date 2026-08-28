@@ -73,25 +73,40 @@ def _stream_key(value: Any) -> tuple[int, str]:
 
 
 def candidate_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    """Deterministic identity key. Stage ranking must use stage_winner + policy margins."""
     cer = finite(row.get("cer_route"))
-    q = finite(row.get("q_kw")) if row.get("qkw_calibrated") else None
-    nll = finite(row.get("nll"))
-    quality = row.get("audio_quality") or {}
-    extra = finite(row.get("extra_ratio"))
-    overlap = finite(quality.get("p_overlap"))
-    ref = finite(row.get("speaker_ref_score"))
     return (
         float("inf") if cer is None else cer,
-        float("inf") if q is None else -q,
-        float("inf") if nll is None else nll,
-        float("inf") if ref is None else -ref,
-        float("inf") if extra is None else extra,
-        float("inf") if overlap is None else overlap,
         0 if row.get("view") == "raw" else 1,
-        0 if row.get("role") == "s1" else 1,
+        0 if row.get("stream") == "original" else 1,
         _stream_key(row.get("stream")),
         str(row.get("candidate_id") or ""),
     )
+
+
+def _conservative_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        0 if row.get("view") == "raw" else 1,
+        0 if row.get("stream") == "original" else 1,
+        _stream_key(row.get("stream")),
+        str(row.get("candidate_id") or ""),
+    )
+
+
+def _within_margin(best: float, value: float, margin: float, *, higher_is_better: bool) -> bool:
+    if higher_is_better:
+        return (best - value) < margin - 1e-15 or abs(best - value) <= 1e-12
+    return (value - best) < margin - 1e-15 or abs(best - value) <= 1e-12
+
+
+def _pool_by_score(pool: list[dict[str, Any]], getter, margin: float, *, higher_is_better: bool) -> list[dict[str, Any]]:
+    scored = [(row, getter(row)) for row in pool]
+    values = [v for _, v in scored if v is not None]
+    if len(values) != len(pool):
+        return pool
+    best = max(values) if higher_is_better else min(values)
+    kept = [row for row, value in scored if value is not None and _within_margin(best, value, margin, higher_is_better=higher_is_better)]
+    return kept or pool
 
 
 def rankable(rows: Iterable[dict[str, Any]], role: str | None = None) -> list[dict[str, Any]]:
@@ -103,24 +118,24 @@ def rankable(rows: Iterable[dict[str, Any]], role: str | None = None) -> list[di
     ]
 
 
-def _view_reason(winner: dict[str, Any], candidates: list[dict[str, Any]]) -> str:
+def _view_reason(winner: dict[str, Any], candidates: list[dict[str, Any]], policy: RoutePolicy) -> str:
     raw = [r for r in candidates if r.get("view") == "raw"]
     moss = [r for r in candidates if r.get("view") == "moss48k"]
-    best_raw = min(raw, key=candidate_key) if raw else None
-    best_moss = min(moss, key=candidate_key) if moss else None
+    best_raw = min(raw, key=lambda r: stage_sort_tuple(r, policy)) if raw else None
+    best_moss = min(moss, key=lambda r: stage_sort_tuple(r, policy)) if moss else None
     if winner.get("view") == "moss48k":
         if best_raw is None:
             return "MOSS_ONLY"
         c_m, c_r = float(winner["cer_route"]), float(best_raw["cer_route"])
         if c_m < c_r - 1e-12:
             return "MOSS_LOWER_CER"
-        if abs(c_m - c_r) <= 1e-12:
-            if winner.get("qkw_calibrated") and best_raw.get("qkw_calibrated"):
-                qg = (finite(winner.get("q_kw")) or 0) - (finite(best_raw.get("q_kw")) or 0)
-                if qg > 1e-12:
-                    return "MOSS_EQUAL_CER_QKW_GAIN"
-            return "MOSS_EQUAL_CER_OTHER"
-        return "MOSS_OTHER"
+        qgain = _qkw_gain(winner, best_raw)
+        if qgain is not None and qgain >= policy.qkw_switch_margin:
+            return "MOSS_EQUAL_CER_QKW_GAIN"
+        ngain = _nll_gain(winner, best_raw)
+        if ngain is not None and ngain >= policy.nll_switch_margin:
+            return "MOSS_EQUAL_CER_NLL_GAIN"
+        return "MOSS_EQUAL_CER_OTHER"
     if best_moss is None:
         return "RAW_ONLY"
     c_w, c_m = float(winner["cer_route"]), float(best_moss["cer_route"])
@@ -129,20 +144,49 @@ def _view_reason(winner: dict[str, Any], candidates: list[dict[str, Any]]) -> st
     return "RAW_CONSERVATIVE_TIE"
 
 
-def stage_winner(rows: Iterable[dict[str, Any]], role: str) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+def stage_sort_tuple(row: dict[str, Any], policy: RoutePolicy) -> tuple[Any, ...]:
+    cer = finite(row.get("cer_route"))
+    return (float("inf") if cer is None else cer, *_conservative_key(row))
+
+
+def stage_winner(
+    rows: Iterable[dict[str, Any]],
+    role: str,
+    policy: RoutePolicy | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    policy = policy or RoutePolicy()
     candidates = rankable(rows, role)
     if not candidates:
         return None, {"role": role, "status": "no_rankable_candidate", "n_candidates": 0, "view_reason_code": None}
-    winner = min(candidates, key=candidate_key)
+    min_cer = min(float(c["cer_route"]) for c in candidates)
+    pool = [c for c in candidates if abs(float(c["cer_route"]) - min_cer) <= 1e-12]
+    if all(c.get("qkw_calibrated") and finite(c.get("q_kw")) is not None for c in pool):
+        pool = _pool_by_score(pool, lambda r: finite(r.get("q_kw")), policy.qkw_switch_margin, higher_is_better=True)
+    elif all(finite(c.get("nll")) is not None for c in pool):
+        pool = _pool_by_score(pool, lambda r: finite(r.get("nll")), policy.nll_switch_margin, higher_is_better=False)
+    if all(finite(c.get("speaker_ref_score")) is not None for c in pool):
+        pool = _pool_by_score(pool, lambda r: finite(r.get("speaker_ref_score")), policy.speaker_switch_margin, higher_is_better=True)
+    if all(finite(c.get("extra_ratio")) is not None for c in pool):
+        pool = _pool_by_score(pool, lambda r: finite(r.get("extra_ratio")), policy.quality_regression_tolerance, higher_is_better=False)
+    overlaps = [finite((c.get("audio_quality") or {}).get("p_overlap")) for c in pool]
+    if all(v is not None for v in overlaps):
+        pool = _pool_by_score(
+            pool,
+            lambda r: finite((r.get("audio_quality") or {}).get("p_overlap")),
+            policy.quality_regression_tolerance,
+            higher_is_better=False,
+        )
+    winner = min(pool, key=_conservative_key)
     return winner, {
         "role": role,
         "status": "selected",
         "n_candidates": len(candidates),
+        "n_l1_tied": len(pool),
         "winner": winner["candidate_id"],
         "winner_cer_route": winner["cer_route"],
         "winner_view": winner.get("view"),
         "winner_stream": winner.get("stream"),
-        "view_reason_code": _view_reason(winner, candidates),
+        "view_reason_code": _view_reason(winner, candidates, policy),
     }
 
 
@@ -212,8 +256,8 @@ def _s7_available(rows: list[dict[str, Any]]) -> bool:
 
 def route_uid(rows: Iterable[dict[str, Any]], policy: RoutePolicy) -> dict[str, Any]:
     values = [dict(r) for r in rows]
-    w1, t1 = stage_winner(values, "s1")
-    w7, t7 = stage_winner(values, "s7")
+    w1, t1 = stage_winner(values, "s1", policy)
+    w7, t7 = stage_winner(values, "s7", policy)
     triggered, trigger_reasons = trigger_s7(w1, policy)
     s7_ok = _s7_available(values)
     trace: list[dict[str, Any]] = [
@@ -281,6 +325,11 @@ def route_uid(rows: Iterable[dict[str, Any]], policy: RoutePolicy) -> dict[str, 
     low_status = "zero" if cer is not None and cer <= 1e-12 else "min_nonzero"
     if policy.cer_accept_thr is not None and cer is not None and cer > policy.cer_accept_thr:
         low_status = "above_acceptance_threshold"
+    production_eligible = (
+        selection_mode == "normal"
+        and cer is not None
+        and reason != "AUDIT_FALLBACK_S1_RAW"
+    )
     trace.append({"step": 5, "rule": "final_selected", "result": selected["candidate_id"] if selected else None, "reason_code": reason})
     return {
         "ok": True,
@@ -297,6 +346,8 @@ def route_uid(rows: Iterable[dict[str, Any]], policy: RoutePolicy) -> dict[str, 
         "s7_available": s7_ok,
         "s1_view_reason_code": t1.get("view_reason_code"),
         "s7_view_reason_code": t7.get("view_reason_code"),
+        "has_finite_cer": cer is not None,
+        "production_eligible": production_eligible,
         "trace": trace,
     }
 
@@ -304,20 +355,10 @@ def route_uid(rows: Iterable[dict[str, Any]], policy: RoutePolicy) -> dict[str, 
 def _audit_fallback(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
     decodable = [
         r for r in rows
-        if r.get("role") == "s1" and r.get("view") == "raw" and r.get("decode_ok", r.get("source_wav"))
+        if r.get("role") == "s1" and r.get("view") == "raw"
+        and r.get("decode_ok", bool(r.get("source_wav")))
         and finite(r.get("cer_route")) is not None
     ]
     if not decodable:
-        decodable = [
-            r for r in rows
-            if r.get("role") == "s1" and r.get("view") == "raw" and r.get("source_wav") and Path_exists(r.get("source_wav"))
-        ]
-    if not decodable:
         return None
-    return min(decodable, key=lambda r: (float("inf") if finite(r.get("cer_route")) is None else float(r["cer_route"]), str(r.get("candidate_id"))))
-
-
-def Path_exists(path: Any) -> bool:
-    from pathlib import Path
-
-    return bool(path) and Path(str(path)).is_file()
+    return min(decodable, key=lambda r: (float(r["cer_route"]), str(r.get("candidate_id"))))

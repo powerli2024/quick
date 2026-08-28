@@ -91,8 +91,12 @@ def quality_metrics(x: np.ndarray, sr: int, *, p_music: float | None = None, p_o
         }
     rms = float(np.sqrt(np.mean(y * y)))
     peak = float(np.max(np.abs(y)))
+    # Frame-energy speech proxy (not a frozen production VAD). Also compute
+    # spectral flux as mean frame-to-frame spectral L1 change, not bin-adjacent
+    # difference of a single global FFT.
     frame = max(1, int(round(sr * 0.02)))
     usable = y[: (len(y) // frame) * frame]
+    flux = 0.0
     if usable.size:
         powers = np.mean(usable.reshape(-1, frame) ** 2, axis=1)
         threshold = max(float(np.percentile(powers, 20)) * 2.0, 1e-7)
@@ -107,6 +111,18 @@ def quality_metrics(x: np.ndarray, sr: int, *, p_music: float | None = None, p_o
         for value in active:
             current = current + 1 if value else 0
             longest = max(longest, current)
+        n_frames = max(1, usable.size // frame)
+        hop = frame
+        win = np.hanning(frame).astype(np.float32)
+        prev = None
+        diffs = []
+        for i in range(n_frames):
+            chunk = usable[i * hop : i * hop + frame] * win
+            mag = np.abs(np.fft.rfft(chunk))
+            if prev is not None:
+                diffs.append(float(np.mean(np.abs(mag - prev))))
+            prev = mag
+        flux = float(np.mean(diffs)) if diffs else 0.0
     else:
         speech_ratio, snr, snr_valid, longest = 0.0, None, False, 0
     n_spec = min(len(y), max(sr, 1) * 10)
@@ -114,7 +130,6 @@ def quality_metrics(x: np.ndarray, sr: int, *, p_music: float | None = None, p_o
     spec = np.abs(np.fft.rfft(windowed)) if n_spec > 1 else np.array([0.0])
     power = spec * spec + eps
     flatness = float(np.exp(np.mean(np.log(power))) / np.mean(power))
-    flux = float(np.mean(np.abs(np.diff(spec)))) if len(spec) > 1 else 0.0
     freqs = np.fft.rfftfreq(n_spec, d=1.0 / max(sr, 1)) if n_spec > 1 else np.array([0.0])
     total_p = float(np.sum(power))
     low = float(np.sum(power[freqs < 300]) / total_p) if total_p else 0.0
@@ -140,4 +155,5 @@ def quality_metrics(x: np.ndarray, sr: int, *, p_music: float | None = None, p_o
         "p_music": p_music,
         "p_overlap": p_overlap,
         "fatal_invalid": bool(float(len(y) / sr) <= 0 or not np.isfinite(y).all()),
+        "speech_ratio_method": "frame_energy_proxy_not_frozen_vad",
     }

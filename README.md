@@ -36,18 +36,12 @@ bash scripts/run_s1_s7_route.sh
 2. 用 `scripts/score_asr_manifest.py` 调 kws `Qwen3ASRTranscriber`（按 pcm+wake+lang 只转写一次）
 3. `WITH_NLL=1` 时写 target NLL sidecar（只破同分，不是校准 q_kw）
 4. 导出 `review_flat/` 与 `best_sep_selected/`
-5. 没有 CMD/Presence/contest JSON 时状态为 `LOCAL_PASS_NEEDS_CMD_PRESENCE`，`production_approved=false`
+5. `SE_BACKEND=spectral` 最多本地验收，**永远不会** `production_approved=true`
+6. I8 `PASS` 要求生产 SE（command/precomputed）+ 带 schema/bindings/UID 指纹/逐语言指标的 CMD/Presence/contest JSON
 
 摸底闭环（不跑神经 SE）可设 `SE_BACKEND=spectral`。中断后续跑保持同一 `WORK_DIR` 并 `RESUME=1`。
 
-I8 验收把冻结结果挂上：
-
-```bash
-CMD_RESULT_JSON=/root/autodl-tmp/cmd.json \
-PRESENCE_RESULT_JSON=/root/autodl-tmp/presence.json \
-CONTEST_RESULT_JSON=/root/autodl-tmp/contest.json \
-bash scripts/run_s1_s7_route.sh
-```
+正式门还要求：`n_selected_finite_cer = n_baseline_finite_cer = n_paired = expected_uid`，且禁止 audit_fallback / missing ASR。`--qkw-calibrated` 必须同时提供 `--qkw-calibrator-hash`。策略默认读 `configs/route_policy.json`，可用 `--policy-json` 覆盖。
 
 ## 输入约定
 

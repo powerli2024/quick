@@ -173,6 +173,14 @@ def add_se_views(
     views: list[dict[str, Any]] = list(refs)
     se_hashes: set[str] = set()
     n_fail_refs = 0
+    refs_by_pcm: dict[str, list[dict[str, Any]]] = {}
+    for raw in refs:
+        if raw.get("view") != "raw":
+            continue
+        pcm = raw.get("pcm_sha256")
+        if not pcm:
+            continue
+        refs_by_pcm.setdefault(str(pcm), []).append(raw)
     for raw_hash, can in raw_ok:
         dest = output_by_raw[raw_hash]
         se_error = failures.get(raw_hash)
@@ -191,9 +199,7 @@ def add_se_views(
                         registry[shash] = InventoryCanonical(shash, file_sha256(dest), str(dest.resolve()), sr, quality_metrics(after, sr), wav=None)
                 except Exception as exc:
                     se_error = f"{type(exc).__name__}: {exc}"
-        for raw in refs:
-            if raw.get("pcm_sha256") != raw_hash or raw.get("view") != "raw":
-                continue
+        for raw in refs_by_pcm.get(raw_hash, []):
             row = dict(raw)
             row.update({
                 "candidate_id": str(raw["candidate_id"]).replace("-raw-", "-moss48k-"),

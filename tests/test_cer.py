@@ -1,5 +1,3 @@
-import pytest
-
 from quick.cer import detail, load_alias_table
 
 
@@ -26,7 +24,6 @@ def test_english_partial_colmo_is_nonzero_but_rankable():
 
 
 def test_chinese_toneless_pinyin():
-    pytest.importorskip("pypinyin")
     scored = detail("科目", "科慕")
     assert scored["cer_route"] == 0.0
     assert scored["cer_char"] > 0.0
