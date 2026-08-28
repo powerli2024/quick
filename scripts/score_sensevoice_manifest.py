@@ -55,6 +55,8 @@ def _one(model, row: dict, device: str) -> dict:
             use_itn=False,
             batch_size_s=300,
             merge_vad=True,
+            disable_pbar=True,
+            disable_log=True,
         )
         item = result[0] if isinstance(result, list) and result else result
         if isinstance(item, dict):
@@ -117,9 +119,18 @@ def main() -> int:
         vad_model=None,
         device=args.device,
         disable_update=True,
+        disable_pbar=True,
+        disable_log=True,
         trust_remote_code=True,
     )
-    _write(args.output, (_one(model, row, args.device) for row in unique.values()))
+    total = len(unique)
+    def results():
+        for idx, row in enumerate(unique.values(), 1):
+            yield _one(model, row, args.device)
+            if idx == total or idx % 50 == 0:
+                print(f"\r[A3][SenseVoice] {idx}/{total}", end="", file=sys.stderr, flush=True)
+        print(file=sys.stderr)
+    _write(args.output, results())
     print(f"[A3][SenseVoice] unique={len(unique)} output={args.output}", file=sys.stderr)
     return 0
 
