@@ -42,6 +42,11 @@ def score_key(row: dict[str, Any]) -> str:
 
 def _lookup_keys(row: dict[str, Any]) -> list[str]:
     keys: list[str] = []
+    # Prefer the canonical (PCM + wake text + language) key.  A single PCM
+    # can legitimately occur under more than one UID/wake phrase, so a bare
+    # ``pcm:`` key is only a last-resort legacy lookup.
+    if row.get("score_key"):
+        keys.append(f"score:{row['score_key']}")
     if row.get("candidate_id"):
         keys.append(f"id:{row['candidate_id']}")
     pcm = _pcm_of(row)
@@ -50,8 +55,6 @@ def _lookup_keys(row: dict[str, Any]) -> list[str]:
         keys.append(f"asr:{json_hash([pcm, str(wake), str(lang)])}")
     elif pcm:
         keys.append(f"pcm:{pcm}")
-    if row.get("score_key"):
-        keys.append(f"score:{row['score_key']}")
     for field in ("path", "wav", "source_wav"):
         if row.get(field):
             keys.append(f"path:{row[field]}")
@@ -90,6 +93,12 @@ def load_sidecar(path: str | Path | None) -> dict[str, dict[str, Any]]:
             raise ValueError(f"sidecar row has no key: {path}")
         for key in keys:
             if key in out and not _compatible(out[key], row):
+                # Different wake phrases may share one PCM.  Exact score_key
+                # and candidate_id bindings remain strict; retaining the
+                # first bare PCM/path binding keeps legacy sidecars usable
+                # without silently changing the canonical lookup.
+                if key.startswith("pcm:"):
+                    continue
                 raise ValueError(f"conflicting sidecar records for {key}: {path}")
             if key not in out:
                 out[key] = row
@@ -231,12 +240,15 @@ def score_rows(
         n = find_sidecar(nll, lookup) or a or {}
         q = find_sidecar(qkw, lookup) or {}
         qvalue = finite(q.get("q_kw"))
+        align_value = finite(q.get("ctc_align_score", q.get("align_score")))
         nvalue = finite(n.get("nll", a.get("nll")))
         calibrated = bool(qvalue is not None and (qkw_calibrated or q.get("score_kind") == "calibrated_qkw"))
         asr_features[sk] = {
             **text,
             "nll": nvalue,
             "q_kw": qvalue,
+            "keyword_score": align_value,
+            "keyword_score_kind": q.get("score_kind", "ctc_align") if align_value is not None else None,
             "qkw_calibrated": calibrated,
             "score_kind": "calibrated_qkw" if calibrated else "nll",
             "token_count": n.get("token_count", a.get("token_count")),

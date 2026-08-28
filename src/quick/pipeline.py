@@ -14,7 +14,7 @@ from .export import export_flat
 from .inventory import build_inventory
 from .io import read_json, write_json, write_jsonl
 from .policy import DEFAULT_POLICY_JSON, build_route_policy, load_policy_file
-from .scoring import score_rows
+from .scoring import score_key, score_rows
 from .se import add_se_views
 from .signatures import assert_work_dir_signature, file_sha256, freeze_signatures, hash_model_dir
 from .validate import ExportValidationError, validate_review_flat
@@ -34,6 +34,7 @@ class RunConfig:
     nll_command: str | None = None
     embedding_command: str | None = None
     qkw_jsonl: Path | None = None
+    qkw_command: str | None = None
     qkw_calibrated: bool = False
     embedding_jsonl: Path | None = None
     noise_jsonl: Path | None = None
@@ -111,7 +112,7 @@ def _write_asr_manifest(work: Path, rows: list[dict[str, Any]]) -> Path:
         {
             "candidate_id": r["candidate_id"], "input": r.get("source_wav"),
             "pcm_sha256": r.get("pcm_sha256"), "wake_text": r["wake_text"], "lang": r["lang"],
-            "score_key": r.get("score_key"),
+            "score_key": r.get("score_key") or score_key(r),
         }
         for r in rows if r.get("source_wav")
     ])
@@ -183,6 +184,7 @@ def run(cfg: RunConfig) -> dict[str, Any]:
         noise_sidecar=cfg.noise_jsonl,
         asr_command=cfg.asr_command,
         nll_command=cfg.nll_command,
+        qkw_command=cfg.qkw_command,
         embedding_command=cfg.embedding_command,
         english_alias_table_hash=alias_table_hash(aliases),
         qkw_calibrator_hash=cfg.qkw_calibrator_hash,
@@ -224,6 +226,9 @@ def run(cfg: RunConfig) -> dict[str, Any]:
     nll_path = cfg.nll_jsonl
     if cfg.nll_command:
         nll_path = _run_sidecar_command(cfg.nll_command, manifest=asr_manifest, output=work / "nll.jsonl")
+    qkw_path = cfg.qkw_jsonl
+    if cfg.qkw_command:
+        qkw_path = _run_sidecar_command(cfg.qkw_command, manifest=asr_manifest, output=work / "qkw.jsonl")
     embed_path = cfg.embedding_jsonl
     if cfg.embedding_command:
         embed_path = _run_sidecar_command(cfg.embedding_command, manifest=asr_manifest, output=work / "embed.jsonl")
@@ -236,11 +241,12 @@ def run(cfg: RunConfig) -> dict[str, Any]:
         asr_context_mode=cfg.asr_context_mode,
         asr_sidecar=asr_path,
         nll_sidecar=nll_path,
-        qkw_sidecar=cfg.qkw_jsonl,
+        qkw_sidecar=qkw_path,
         embedding_sidecar=embed_path,
         noise_sidecar=cfg.noise_jsonl,
         asr_command=cfg.asr_command,
         nll_command=cfg.nll_command,
+        qkw_command=cfg.qkw_command,
         embedding_command=cfg.embedding_command,
         english_alias_table_hash=alias_table_hash(aliases),
         qkw_calibrator_hash=cfg.qkw_calibrator_hash,
@@ -257,7 +263,7 @@ def run(cfg: RunConfig) -> dict[str, Any]:
 
     scored, score_meta = score_rows(
         all_rows, registry, asr_sidecar=asr_path, nll_sidecar=nll_path,
-        qkw_sidecar=cfg.qkw_jsonl, embedding_sidecar=embed_path,
+        qkw_sidecar=qkw_path, embedding_sidecar=embed_path,
         noise_sidecar=cfg.noise_jsonl, aliases=aliases,
         allow_missing_asr=cfg.allow_missing_asr, qkw_calibrated=cfg.qkw_calibrated,
         feature_dir=work, policy=policy,
@@ -379,6 +385,7 @@ def run_from_args(args: Any) -> dict[str, Any]:
         asr_model_dir=getattr(args, "asr_model_dir", None),
         nll_jsonl=args.nll_jsonl, nll_command=getattr(args, "nll_command", None),
         qkw_jsonl=args.qkw_jsonl,
+        qkw_command=getattr(args, "qkw_command", None),
         qkw_calibrated=bool(args.qkw_calibrated),
         embedding_jsonl=args.embedding_jsonl,
         embedding_command=getattr(args, "embedding_command", None),

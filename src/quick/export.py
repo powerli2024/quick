@@ -168,6 +168,7 @@ def export_flat(
     failures: list[str] = []
     trigger_n = switch_n = 0
     switch_cer = switch_qkw = switch_nll = switch_spk = 0
+    switch_ctc = 0
     used_basenames: set[str] = set()
     se_delta = {"improved": 0, "worsened": 0, "same": 0, "by_content_class": defaultdict(lambda: {"improved": 0, "worsened": 0, "same": 0})}
     selected_cers: list[float] = []
@@ -313,6 +314,8 @@ def export_flat(
                 switch_cer += 1
             elif code == "SWITCH_S7_EQUAL_CER_QKW_GAIN":
                 switch_qkw += 1
+            elif code == "SWITCH_S7_EQUAL_CER_CTC_GAIN":
+                switch_ctc += 1
             elif code == "SWITCH_S7_EQUAL_CER_NLL_GAIN":
                 switch_nll += 1
             elif code == "SWITCH_S7_EQUAL_CER_SPK_GAIN":
@@ -363,6 +366,7 @@ def export_flat(
             "n_switch": switch_n,
             "n_switch_lower_cer": switch_cer,
             "n_switch_qkw": switch_qkw,
+            "n_switch_ctc": switch_ctc,
             "n_switch_nll": switch_nll,
             "n_switch_spk": switch_spk,
         },

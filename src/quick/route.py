@@ -24,6 +24,7 @@ REASON_CODES = (
     "SAME_AUDIO_KEEP_S1",
     "SWITCH_S7_LOWER_CER",
     "SWITCH_S7_EQUAL_CER_QKW_GAIN",
+    "SWITCH_S7_EQUAL_CER_CTC_GAIN",
     "SWITCH_S7_EQUAL_CER_NLL_GAIN",
     "SWITCH_S7_EQUAL_CER_SPK_GAIN",
     "SWITCH_S7_S1_UNAVAILABLE",
@@ -40,6 +41,7 @@ REASON_TEXT = {
     "SAME_AUDIO_KEEP_S1": "s1、s7 winner 为同一 PCM，只保留 s1 决策身份",
     "SWITCH_S7_LOWER_CER": "s7 严格降低 CER",
     "SWITCH_S7_EQUAL_CER_QKW_GAIN": "同 CER 下冻结 q_kw 显著改善",
+    "SWITCH_S7_EQUAL_CER_CTC_GAIN": "同 CER 下独立 CTC 已知词对齐分数显著改善",
     "SWITCH_S7_EQUAL_CER_NLL_GAIN": "未校准模式下，同 UID 同 CER 的 NLL 显著改善",
     "SWITCH_S7_EQUAL_CER_SPK_GAIN": "同 CER/文本证据下，独立声纹证据显著改善",
     "SWITCH_S7_S1_UNAVAILABLE": "s1 无 rankable 候选，使用 s7",
@@ -132,6 +134,9 @@ def _view_reason(winner: dict[str, Any], candidates: list[dict[str, Any]], polic
         qgain = _qkw_gain(winner, best_raw)
         if qgain is not None and qgain >= policy.qkw_switch_margin:
             return "MOSS_EQUAL_CER_QKW_GAIN"
+        kgain = _keyword_gain(winner, best_raw)
+        if kgain is not None and kgain >= policy.qkw_switch_margin:
+            return "MOSS_EQUAL_CER_CTC_GAIN"
         ngain = _nll_gain(winner, best_raw)
         if ngain is not None and ngain >= policy.nll_switch_margin:
             return "MOSS_EQUAL_CER_NLL_GAIN"
@@ -162,6 +167,10 @@ def stage_winner(
     pool = [c for c in candidates if abs(float(c["cer_route"]) - min_cer) <= 1e-12]
     if all(c.get("qkw_calibrated") and finite(c.get("q_kw")) is not None for c in pool):
         pool = _pool_by_score(pool, lambda r: finite(r.get("q_kw")), policy.qkw_switch_margin, higher_is_better=True)
+    elif all(finite(c.get("keyword_score")) is not None for c in pool):
+        # A3's independent WeNet CTC score is not assumed calibrated across
+        # recordings, but is a useful same-UID tie breaker.
+        pool = _pool_by_score(pool, lambda r: finite(r.get("keyword_score")), policy.qkw_switch_margin, higher_is_better=True)
     elif all(finite(c.get("nll")) is not None for c in pool):
         pool = _pool_by_score(pool, lambda r: finite(r.get("nll")), policy.nll_switch_margin, higher_is_better=False)
     if all(finite(c.get("speaker_ref_score")) is not None for c in pool):
@@ -194,6 +203,11 @@ def _qkw_gain(new: dict[str, Any], old: dict[str, Any]) -> float | None:
     if not new.get("qkw_calibrated") or not old.get("qkw_calibrated"):
         return None
     n, o = finite(new.get("q_kw")), finite(old.get("q_kw"))
+    return None if n is None or o is None else n - o
+
+
+def _keyword_gain(new: dict[str, Any], old: dict[str, Any]) -> float | None:
+    n, o = finite(new.get("keyword_score")), finite(old.get("keyword_score"))
     return None if n is None or o is None else n - o
 
 
@@ -306,10 +320,13 @@ def route_uid(rows: Iterable[dict[str, Any]], policy: RoutePolicy) -> dict[str, 
             trace.append({"step": 4, "rule": "compare_cer_route", "result": "keep_s1", "evidence": {"s1": c1, "s7": c7}})
         else:
             qgain = _qkw_gain(w7, w1)
+            kgain = _keyword_gain(w7, w1)
             ngain = _nll_gain(w7, w1)
             sgain = _speaker_gain(w7, w1)
             if qgain is not None and qgain >= policy.qkw_switch_margin:
                 selected, switched, reason = w7, True, "SWITCH_S7_EQUAL_CER_QKW_GAIN"
+            elif kgain is not None and kgain >= policy.qkw_switch_margin:
+                selected, switched, reason = w7, True, "SWITCH_S7_EQUAL_CER_CTC_GAIN"
             elif qgain is None and ngain is not None and ngain >= policy.nll_switch_margin:
                 selected, switched, reason = w7, True, "SWITCH_S7_EQUAL_CER_NLL_GAIN"
             elif sgain is not None and sgain >= policy.speaker_switch_margin and _quality_not_worse(w7, w1, policy.quality_regression_tolerance):
@@ -318,7 +335,7 @@ def route_uid(rows: Iterable[dict[str, Any]], policy: RoutePolicy) -> dict[str, 
                 selected, reason = w1, "KEEP_S1_TIE_NO_GAIN"
             trace.append({
                 "step": 4, "rule": "equal_cer_tie_break", "result": "switch" if switched else "keep_s1",
-                "evidence": {"qkw_gain": qgain, "nll_gain": ngain, "speaker_gain": sgain, "switched": switched},
+                "evidence": {"qkw_gain": qgain, "ctc_gain": kgain, "nll_gain": ngain, "speaker_gain": sgain, "switched": switched},
             })
 
     cer = finite(selected.get("cer_route")) if selected is not None else None

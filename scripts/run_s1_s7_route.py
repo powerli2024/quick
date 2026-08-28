@@ -32,6 +32,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--nll-command", default=None, help="template containing {manifest} and {output}")
     p.add_argument("--embedding-command", default=None, help="template containing {manifest} and {output}")
     p.add_argument("--qkw-jsonl", type=Path, default=None)
+    p.add_argument("--qkw-command", default=None, help="template containing {manifest} and {output}")
     p.add_argument("--qkw-calibrated", action="store_true")
     p.add_argument("--embedding-jsonl", type=Path, default=None)
     p.add_argument("--noise-jsonl", type=Path, default=None)

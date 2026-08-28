@@ -1,0 +1,14 @@
+# A3: independent SenseVoice transcription + WeNet CTC adapter
+funasr>=1.2.7
+modelscope>=1.20.0
+addict
+datasets==2.16.0
+simplejson
+sortedcontainers
+pydub
+onnx
+onnxconverter-common
+soundfile
+pypinyin
+torch
+torchaudio

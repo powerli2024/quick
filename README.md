@@ -63,3 +63,42 @@ index 至少要有 `uid`、`wake_text`（兼容 `唤醒文本`/`wake`/`text`）�
 | I8 | CMD FRR/FAR + Presence + contest |
 
 平铺目录只用于听审，不能直接冒充 extract-main 的 selected-only `best_sep`。
+# A3：SenseVoice + WeNet CTC 部署
+
+quick 的 A3 主链使用 SenseVoiceSmall 做无提示自由转写，避免 Qwen3 的
+wake/context 提示放大幻觉；WeNet CTC 作为独立已知唤醒词证据。CTC 适配器输出
+`ctc_align_score=1-cer_route`，只在同一 UID 的 CER 并列时作为 tie-breaker，
+不是跨录音概率；拿到开发集校准器后再写入 `q_kw/qkw_calibrated`。
+
+在 AutoDL（`/root/quick` 为本仓库）首次部署：
+
+```bash
+cd /root/quick
+pip install -r requirements-a3.txt
+bash scripts/download_a3_models.sh
+```
+
+随后复用旧分离与 MossFormer-48k 音频。`POS_NEG` 指向已有 extract-sep
+full-audio 根目录，`PRECOMPUTED_SE_DIR` 指向旧 SE 根目录；quick 会按
+`pcm_sha256` 建索引，支持 `se_wav/<hash[:2]>/<hash>.wav`、扁平 hash 以及
+更深层目录，不重复处理已存在音频：
+
+```bash
+POS_NEG=/root/autodl-tmp/kws_sep_fullaudio_v1 \
+PRECOMPUTED_SE_DIR=/root/autodl-tmp/kws_se48k \
+WENET_DECODE_COMMAND='python /root/your_wenet_decode.py --manifest {manifest} --output {output} --model-dir {model_dir}' \
+bash scripts/run_a3_route.sh
+```
+
+默认调用 quick 自带的 `wenet_decode_manifest.py`（需要 `/root/wenet` 源码树和
+下载的 `train.yaml/final.pt`）；如使用其他解码器，`WENET_DECODE_COMMAND`
+必须产生 JSONL（`score_key`+`hyp`）或 Kaldi 风格 `key text` 文件。也可以直接给已有 CTC 转写：
+
+```bash
+QKW_JSONL=/root/autodl-tmp/wenet_decode.jsonl bash scripts/run_a3_route.sh
+```
+
+如果旧 SE 缓存不存在，改为设置 `SE_BATCH_COMMAND`，其命令需接受
+`{manifest}` 并为每行写出声明的 `output`。最终证据位于
+`$WORK_DIR/report.json`、`scored_candidates.jsonl` 和 `review_flat/`；严格
+生产验收仍需独立 CMD/Presence/contest 结果，不能用 spectral 或合成结果放行。

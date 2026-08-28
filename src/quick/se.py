@@ -114,6 +114,18 @@ def add_se_views(
     jobs: list[dict[str, Any]] = []
     output_by_raw: dict[str, Path] = {}
     failures: dict[str, str] = {}
+    precomputed_index: dict[str, Path] = {}
+    if backend == "precomputed" and precomputed_dir is not None:
+        pre_root = Path(precomputed_dir)
+        if pre_root.is_dir():
+            # Previous quick runs use se_wav/<hash[:2]>/<hash>.wav; older
+            # extract-main runs commonly flatten or nest the same hash.  Build
+            # one bounded index so a full run does not perform O(N) rglob per
+            # candidate.
+            for p in pre_root.rglob("*.wav"):
+                stem = p.stem.lower()
+                if len(stem) >= 32 and all(ch in "0123456789abcdef" for ch in stem):
+                    precomputed_index.setdefault(stem, p)
     for raw_hash, can in raw_ok:
         dest = root / raw_hash[:2] / f"{raw_hash}.wav"
         output_by_raw[raw_hash] = dest
@@ -127,6 +139,9 @@ def add_se_views(
                 if precomputed_dir is None:
                     raise ValueError("precomputed backend requires --precomputed-dir")
                 candidates = [Path(precomputed_dir) / f"{raw_hash}.wav"]
+                indexed = precomputed_index.get(str(raw_hash).lower())
+                if indexed is not None:
+                    candidates.insert(0, indexed)
                 for ref in refs:
                     if ref.get("pcm_sha256") == raw_hash and ref.get("source_wav"):
                         candidates.extend([
