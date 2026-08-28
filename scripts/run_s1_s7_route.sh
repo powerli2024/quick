@@ -50,10 +50,11 @@ if [[ "$SE_BACKEND" == "command" && -z "$SE_COMMAND" && -z "$SE_BATCH_COMMAND" ]
   SE_BATCH_COMMAND="python ${KWS_DIR}/scripts/extract_main_se48k_manifest.py --manifest {manifest} --extract-main ${EXTRACT_MAIN} --clearvoice-root ${CLEARVOICE_ROOT} --device ${DEVICE}"
 fi
 
-if [[ -z "${ASR_COMMAND:-}" ]]; then
+if [[ -z "${ASR_COMMAND:-}" || "$ASR_COMMAND" != *"{manifest}"* || "$ASR_COMMAND" != *"{output}"* ]]; then
   # Do not put {manifest}/{output} inside ${VAR:-...}; Bash treats the
   # placeholder braces as part of the parameter expansion and drops/moves
-  # them in the resulting command.
+  # them in the resulting command.  Also replace any inherited malformed
+  # command instead of passing it into the pipeline.
   ASR_COMMAND="python ${REPO_DIR}/scripts/score_asr_manifest.py --manifest {manifest} --output {output} --model-dir ${ASR_MODEL_DIR} --device ${DEVICE} --batch-size ${BATCH_SIZE} --context-mode ${ASR_CONTEXT_MODE}"
 fi
 
