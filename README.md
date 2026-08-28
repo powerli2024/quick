@@ -1,29 +1,71 @@
-# quick：s1/s7 + MossFormer SE 严格选路
+# quick：s1/s7 + MossFormer SE 严格选路（AutoDL Linux）
 
-`quick` 是按 `D:\gpt\kws\docs\S1_S7选路与平铺审阅导出方案.md` 落地的独立实现，不修改
-`kws` 项目。它完成 I0–I8：输入和签名审计、PCM 去重、raw/SE 评分、s1/s7 选路、逐 UID reason JSON、
-平铺审阅导出、selected-only 导出，以及 CMD/Presence/contest 验收。
+`quick` 按 [`docs/S1_S7选路与平铺审阅导出方案.md`](docs/S1_S7选路与平铺审阅导出方案.md) 落地 I0–I8。
+输入约定对齐 `kws` 的 extract-sep 目录；ASR / NLL / embedding / MossFormer 通过 sidecar 或
+command 复用 `/root/kws` 与 `/root/extract-main`，不修改 kws。
 
-正式运行需要提供冻结 ASR sidecar（或 `--asr-command`）、MossFormer SE 批处理命令/预计算目录，以及可选
-的 q_kw、embedding、噪声模型 sidecar。没有这些外部模型结果时程序会保留明确的 `PENDING_EXTERNAL` 或
-`NO_GO`，不会把缺失模型当成通过。
+目标环境是 **AutoDL Linux**（`/root/...`、`cuda:0`、bash）。`s7_arm=auto` 在冻结复验中禁止。
 
-## 快速检查
+## 本地检查
 
-```powershell
-cd D:\gpt\quick
+```bash
+cd /root/quick
 python -m pytest -q
-python scripts\run_s1_s7_route.py --help
+python scripts/run_s1_s7_route.py --help
+```
+
+## AutoDL 正式跑
+
+冻结 s7 arm 后：
+
+```bash
+cd /root/quick
+export POS_NEG=/root/autodl-tmp/kws_sep
+export WORK_DIR=/root/autodl-tmp/quick_s1_s7
+export ASR_MODEL_DIR=/root/autodl-tmp/Qwen3-ASR-1.7B
+export S7_ARM=s7_cv_then_onnx_gate/thr_a   # 开发集锁定的精确标签
+export KWS_DIR=/root/kws
+export EXTRACT_MAIN=/root/extract-main
+export CLEARVOICE_ROOT=/root/autodl-tmp/ClearerVoice-Studio
+bash scripts/run_s1_s7_route.sh
+```
+
+默认会：
+
+1. 用 kws 的 `extract_main_se48k_manifest.py` 对 unique raw PCM 跑 MossFormer2_SE_48K
+2. 用 `scripts/score_asr_manifest.py` 调 kws `Qwen3ASRTranscriber`（按 pcm+wake+lang 只转写一次）
+3. `WITH_NLL=1` 时写 target NLL sidecar（只破同分，不是校准 q_kw）
+4. 导出 `review_flat/` 与 `best_sep_selected/`
+5. 没有 CMD/Presence/contest JSON 时状态为 `LOCAL_PASS_NEEDS_CMD_PRESENCE`，`production_approved=false`
+
+摸底闭环（不跑神经 SE）可设 `SE_BACKEND=spectral`。中断后续跑保持同一 `WORK_DIR` 并 `RESUME=1`。
+
+I8 验收把冻结结果挂上：
+
+```bash
+CMD_RESULT_JSON=/root/autodl-tmp/cmd.json \
+PRESENCE_RESULT_JSON=/root/autodl-tmp/presence.json \
+CONTEST_RESULT_JSON=/root/autodl-tmp/contest.json \
+bash scripts/run_s1_s7_route.sh
 ```
 
 ## 输入约定
 
-`--pos-neg` 与 kws 相同，根目录包含 `pos/`、`neg/`，每个阶段 arm 下有 `index.jsonl` 和 `wav/`。
-index 中至少要有 `uid`、`wake_text`（旧字段 `唤醒文本`/`wake`/`text` 也可）、`streams`；缺少
-`lang` 时按唤醒文本推导。s1/s7 arm 必须显式传入，最终禁止 `auto`。
+`--pos-neg` 与 kws 相同：`pos/`、`neg/`，每个 arm 下有 `index.jsonl` 和 `wav/`。
+index 至少要有 `uid`、`wake_text`（兼容 `唤醒文本`/`wake`/`text`）、`streams`；缺少 `lang` 时按
+唤醒文本推导。`original` 在 WAV 文件名中可对应 `peak`。s7 某 UID 缺失记为 `s7_available=false`。
 
-## 设计文档
+## 阶段产物
 
-完整的候选排序、s7 触发、SE 解释、平铺文件名和 JSON 契约见：
+| 阶段 | 产物 |
+|---|---|
+| I0 | `signatures.json` |
+| I1 | `file_sha256` + `pcm_sha256` registry |
+| I2 | unique raw 一次 SE；失败写 8000 占位 JSON |
+| I3 | unique `(pcm, wake, lang)` 一次 ASR/NLL |
+| I4–I5 | 冻结 `reason_code` 与 `decision_trace` |
+| I6 | `review_flat/`：`0000__SELECTED` 在组内第一条 |
+| I7 | 从 0000 物化 selected-only，不再选路 |
+| I8 | CMD FRR/FAR + Presence + contest |
 
-`D:\gpt\kws\docs\S1_S7选路与平铺审阅导出方案.md`
+平铺目录只用于听审，不能直接冒充 extract-main 的 selected-only `best_sep`。

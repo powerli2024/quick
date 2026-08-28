@@ -1,0 +1,7 @@
+numpy>=1.23
+pytest>=7
+# AutoDL Chinese CER:
+#   python -m pip install -U pypinyin
+# AutoDL ASR / NLL (same interpreter as /root/kws):
+#   python -m pip install -U qwen-asr torch transformers soundfile
+# MossFormer adapter lives in /root/kws/scripts/extract_main_se48k_manifest.py

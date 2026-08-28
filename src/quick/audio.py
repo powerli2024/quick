@@ -53,7 +53,10 @@ def write_wav(path: str | Path, x: np.ndarray, sr: int = 16000) -> None:
     except Exception:
         pcm = (x * 32767).astype(np.int16)
         with wave.open(str(p), "wb") as handle:
-            handle.setnchannels(1); handle.setsampwidth(2); handle.setframerate(sr); handle.writeframes(pcm.tobytes())
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(sr)
+            handle.writeframes(pcm.tobytes())
 
 
 def canonical_pcm(x: np.ndarray, sr: int, target_sr: int = 16000) -> np.ndarray:
@@ -77,7 +80,15 @@ def quality_metrics(x: np.ndarray, sr: int, *, p_music: float | None = None, p_o
     y = np.asarray(x, dtype=np.float32).reshape(-1)
     eps = 1e-8
     if y.size == 0 or not np.isfinite(y).all():
-        return {"duration_sec": 0.0, "fatal_invalid": True, "reason": "empty_or_nonfinite"}
+        return {
+            "duration_sec": 0.0,
+            "fatal_invalid": True,
+            "reason": "empty_or_nonfinite",
+            "rms_dbfs": None,
+            "peak": None,
+            "clip_rate": None,
+            "speech_ratio": None,
+        }
     rms = float(np.sqrt(np.mean(y * y)))
     peak = float(np.max(np.abs(y)))
     frame = max(1, int(round(sr * 0.02)))
@@ -91,16 +102,24 @@ def quality_metrics(x: np.ndarray, sr: int, *, p_music: float | None = None, p_o
         p_noise = float(np.mean(powers[~active])) if (~active).any() else 0.0
         snr_valid = bool(active.any() and (~active).any() and p_noise > eps)
         snr = 10 * math.log10(max(p_active - p_noise, eps) / (p_noise + eps)) if snr_valid else None
-        longest = 0; current = 0
+        longest = 0
+        current = 0
         for value in active:
             current = current + 1 if value else 0
             longest = max(longest, current)
     else:
         speech_ratio, snr, snr_valid, longest = 0.0, None, False, 0
-    spec = np.abs(np.fft.rfft(y[: min(len(y), sr * 10)] * np.hanning(min(len(y), sr * 10)))) if len(y) > 1 else np.array([0.0])
+    n_spec = min(len(y), max(sr, 1) * 10)
+    windowed = y[:n_spec] * np.hanning(n_spec) if n_spec > 1 else y[:n_spec]
+    spec = np.abs(np.fft.rfft(windowed)) if n_spec > 1 else np.array([0.0])
     power = spec * spec + eps
     flatness = float(np.exp(np.mean(np.log(power))) / np.mean(power))
     flux = float(np.mean(np.abs(np.diff(spec)))) if len(spec) > 1 else 0.0
+    freqs = np.fft.rfftfreq(n_spec, d=1.0 / max(sr, 1)) if n_spec > 1 else np.array([0.0])
+    total_p = float(np.sum(power))
+    low = float(np.sum(power[freqs < 300]) / total_p) if total_p else 0.0
+    mid = float(np.sum(power[(freqs >= 300) & (freqs < 3400)]) / total_p) if total_p else 0.0
+    high = float(np.sum(power[freqs >= 3400]) / total_p) if total_p else 0.0
     return {
         "duration_sec": float(len(y) / sr),
         "rms_dbfs": float(20 * math.log10(rms + eps)),
@@ -115,6 +134,9 @@ def quality_metrics(x: np.ndarray, sr: int, *, p_music: float | None = None, p_o
         "snr_valid": snr_valid,
         "spectral_flatness": flatness,
         "spectral_flux": flux,
+        "band_energy_low": low,
+        "band_energy_mid": mid,
+        "band_energy_high": high,
         "p_music": p_music,
         "p_overlap": p_overlap,
         "fatal_invalid": bool(float(len(y) / sr) <= 0 or not np.isfinite(y).all()),

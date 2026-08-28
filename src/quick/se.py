@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 from pathlib import Path
@@ -9,13 +10,17 @@ import numpy as np
 
 from .audio import file_sha256, pcm_sha256, quality_metrics, read_wav, write_wav
 from .inventory import Canonical as InventoryCanonical
-from .io import write_json, write_jsonl
+from .io import json_hash, read_json, write_json, write_jsonl
 
 
 def _safe(value: str) -> str:
     import re
 
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value))
+
+
+def _split_cmd(template: str) -> list[str]:
+    return shlex.split(template, posix=os.name != "nt")
 
 
 def _spectral(x: np.ndarray, sr: int) -> np.ndarray:
@@ -54,10 +59,19 @@ def _validate(src: Path, dest: Path) -> tuple[np.ndarray, int]:
     after, sr1 = read_wav(dest)
     if after.size == 0 or not np.isfinite(after).all():
         raise RuntimeError(f"SE output is empty/nonfinite: {dest}")
-    tol = max(int(round(0.1 * sr0)), int(round(before.size * 0.02)))
-    if abs(after.size / max(sr1, 1) - before.size / max(sr0, 1)) > 0.1 or abs(after.size - before.size * sr1 / sr0) > tol:
+    dur0 = before.size / max(sr0, 1)
+    dur1 = after.size / max(sr1, 1)
+    tol = max(0.1, dur0 * 0.02)
+    sample_tol = max(int(round(0.1 * sr0)), int(round(before.size * 0.02)))
+    if abs(dur1 - dur0) > tol or abs(after.size - before.size * sr1 / max(sr0, 1)) > sample_tol:
         raise RuntimeError(f"SE changed duration beyond tolerance: {src} -> {dest}")
     return after, sr1
+
+
+def _load_raw(can: InventoryCanonical) -> tuple[np.ndarray, int]:
+    if can.wav is not None:
+        return np.asarray(can.wav, dtype=np.float32), int(can.sample_rate)
+    return read_wav(can.source_wav)
 
 
 def add_se_views(
@@ -70,81 +84,177 @@ def add_se_views(
     batch_command: str | None = None,
     precomputed_dir: str | Path | None = None,
     resume: bool = True,
+    mossformer_model_hash: str | None = None,
+    inference_signature: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     backend = str(backend).lower().strip()
     if backend not in {"none", "spectral", "command", "precomputed"}:
         raise ValueError(f"unsupported SE backend {backend!r}")
     if backend == "none":
-        return list(refs), {"backend": backend, "n_unique_raw": len(registry), "n_views": 0, "status": "audit_only"}
+        return list(refs), {"backend": backend, "n_unique_raw": len(registry), "n_views": 0, "status": "audit_only", "n_se_failures": 0}
     root = Path(work_dir) / "se_wav"
     root.mkdir(parents=True, exist_ok=True)
-    raw_items = sorted(registry.items())
+    signature = {
+        "backend": backend,
+        "command": command,
+        "batch_command": batch_command,
+        "precomputed_dir": str(Path(precomputed_dir).resolve()) if precomputed_dir else None,
+        "mossformer_model_hash": mossformer_model_hash,
+        "inference_signature": inference_signature or backend,
+        "raw_pcm": sorted(registry),
+    }
+    meta_path = Path(work_dir) / "se_wav.meta.json"
+    if meta_path.is_file():
+        old = read_json(meta_path)
+        if old.get("signature_hash") and old["signature_hash"] != json_hash(signature):
+            raise RuntimeError("SE cache signature mismatch; use a new --work-dir so backends are not mixed")
+    write_json(meta_path, {"status": "running", "signature": signature, "signature_hash": json_hash(signature)})
+
+    raw_ok = [(h, c) for h, c in sorted(registry.items()) if not str(h).startswith("undecodable:")]
     jobs: list[dict[str, Any]] = []
     output_by_raw: dict[str, Path] = {}
-    for raw_hash, can in raw_items:
+    failures: dict[str, str] = {}
+    for raw_hash, can in raw_ok:
         dest = root / raw_hash[:2] / f"{raw_hash}.wav"
         output_by_raw[raw_hash] = dest
         if dest.is_file() and resume:
             continue
-        if backend == "spectral":
-            write_wav(dest, _spectral(can.wav, can.sample_rate), can.sample_rate)
-        elif backend == "precomputed":
-            if precomputed_dir is None:
-                raise ValueError("precomputed backend requires --precomputed-dir")
-            candidates = [Path(precomputed_dir) / f"{raw_hash}.wav"]
-            for ref in refs:
-                if ref["pcm_sha256"] == raw_hash:
-                    candidates.extend([
-                        Path(precomputed_dir) / ref["split"] / f"{ref['uid']}__{ref['role']}__{_safe(ref['arm'])}__{ref['stream']}.wav",
-                        Path(precomputed_dir) / ref["split"] / f"{ref['uid']}_{ref['stream']}.wav",
-                    ])
-                    break
-            source = next((p for p in candidates if p.is_file()), None)
-            if source is None:
-                raise FileNotFoundError(f"missing precomputed SE for raw_pcm={raw_hash}: {candidates}")
-            data, sr = read_wav(source)
-            write_wav(dest, data, sr)
-        elif backend == "command":
-            if batch_command:
-                jobs.append({"raw_pcm_sha256": raw_hash, "input": can.source_wav, "output": str(dest), "sample_rate": can.sample_rate, "length_policy": "full_waveform"})
+        try:
+            if backend == "spectral":
+                wav, sr = _load_raw(can)
+                write_wav(dest, _spectral(wav, sr), sr)
+            elif backend == "precomputed":
+                if precomputed_dir is None:
+                    raise ValueError("precomputed backend requires --precomputed-dir")
+                candidates = [Path(precomputed_dir) / f"{raw_hash}.wav"]
+                for ref in refs:
+                    if ref.get("pcm_sha256") == raw_hash and ref.get("source_wav"):
+                        candidates.extend([
+                            Path(precomputed_dir) / ref["split"] / f"{ref['uid']}__{ref['role']}__{_safe(ref['arm'])}__{ref['stream']}.wav",
+                            Path(precomputed_dir) / ref["split"] / f"{ref['uid']}_{ref['stream']}.wav",
+                        ])
+                        break
+                source = next((p for p in candidates if p.is_file()), None)
+                if source is None:
+                    raise FileNotFoundError(f"missing precomputed SE for raw_pcm={raw_hash}")
+                data, sr = read_wav(source)
+                write_wav(dest, data, sr)
+            elif backend == "command":
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                if batch_command:
+                    jobs.append({
+                        "raw_pcm_sha256": raw_hash, "input": can.source_wav, "output": str(dest),
+                        "sample_rate": can.sample_rate, "length_policy": "full_waveform",
+                    })
+                else:
+                    if not command or "{input}" not in command or "{output}" not in command:
+                        raise ValueError("command backend requires --se-command containing {input} and {output}, or --se-batch-command")
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    argv = _split_cmd(command.format(input=can.source_wav, output=str(dest)))
+                    subprocess.run(argv, check=True)
             else:
-                if not command or "{input}" not in command or "{output}" not in command:
-                    raise ValueError("command backend requires --se-command containing {input} and {output}, or --se-batch-command")
-                argv = shlex.split(command.format(input=can.source_wav, output=str(dest)), posix=False)
-                subprocess.run(argv, check=True)
-        else:
-            raise AssertionError(backend)
+                raise AssertionError(backend)
+        except Exception as exc:
+            failures[raw_hash] = f"{type(exc).__name__}: {exc}"
     if jobs:
         if "{manifest}" not in str(batch_command):
             raise ValueError("--se-batch-command must contain {manifest}")
-        manifest = Path(work_dir) / "se_manifest.jsonl"
-        write_jsonl(manifest, jobs)
-        argv = shlex.split(str(batch_command).format(manifest=str(manifest)), posix=False)
-        subprocess.run(argv, check=True)
+        pending = [j for j in jobs if j["raw_pcm_sha256"] not in failures]
+        if pending:
+            manifest = Path(work_dir) / "se_manifest.jsonl"
+            write_jsonl(manifest, pending)
+            argv = _split_cmd(str(batch_command).format(manifest=str(manifest)))
+            try:
+                subprocess.run(argv, check=True)
+            except Exception as exc:
+                for job in pending:
+                    failures[job["raw_pcm_sha256"]] = f"batch_failed: {type(exc).__name__}: {exc}"
+
     views: list[dict[str, Any]] = list(refs)
     se_hashes: set[str] = set()
-    for raw_hash, can in raw_items:
+    n_fail_refs = 0
+    for raw_hash, can in raw_ok:
         dest = output_by_raw[raw_hash]
-        if not dest.is_file():
-            raise RuntimeError(f"SE backend did not produce output: {dest}")
-        after, sr = _validate(Path(can.source_wav), dest)
-        shash = pcm_sha256(after, sr)
-        se_hashes.add(shash)
-        if shash not in registry:
-            registry[shash] = InventoryCanonical(shash, file_sha256(dest), str(dest), after, sr, quality_metrics(after, sr))
+        se_error = failures.get(raw_hash)
+        after = None
+        sr = can.sample_rate
+        shash = None
+        if se_error is None:
+            if not dest.is_file():
+                se_error = f"SE backend did not produce output: {dest}"
+            else:
+                try:
+                    after, sr = _validate(Path(can.source_wav), dest)
+                    shash = pcm_sha256(after, sr)
+                    se_hashes.add(shash)
+                    if shash not in registry:
+                        registry[shash] = InventoryCanonical(shash, file_sha256(dest), str(dest.resolve()), sr, quality_metrics(after, sr), wav=None)
+                except Exception as exc:
+                    se_error = f"{type(exc).__name__}: {exc}"
         for raw in refs:
-            if raw["pcm_sha256"] != raw_hash:
+            if raw.get("pcm_sha256") != raw_hash or raw.get("view") != "raw":
                 continue
             row = dict(raw)
             row.update({
-                "candidate_id": raw["candidate_id"].replace("-raw-", "-moss48k-"),
-                "view": "moss48k", "source_wav": str(dest.resolve()),
+                "candidate_id": str(raw["candidate_id"]).replace("-raw-", "-moss48k-"),
+                "view": "moss48k",
                 "raw_parent_candidate_id": raw["candidate_id"],
                 "raw_parent_pcm_sha256": raw_hash,
-                "file_sha256": file_sha256(dest), "pcm_sha256": shash, "canonical_id": shash,
                 "se_backend": backend,
+                "se_model_hash": mossformer_model_hash,
+                "inference_mode": "full_waveform",
             })
+            if se_error:
+                row.update({
+                    "source_wav": None, "file_sha256": None, "pcm_sha256": None,
+                    "canonical_id": None, "validity": "fatal_invalid",
+                    "fatal_reason": se_error, "decode_ok": False, "export_placeholder": True,
+                })
+                n_fail_refs += 1
+            else:
+                row.update({
+                    "source_wav": str(dest.resolve()),
+                    "file_sha256": file_sha256(dest),
+                    "pcm_sha256": shash,
+                    "canonical_id": shash,
+                    "validity": "pending",
+                    "decode_ok": True,
+                    "fatal_reason": None,
+                })
             views.append(row)
-    meta = {"backend": backend, "status": "complete", "n_unique_raw": len(raw_items), "n_views": len(views) - len(refs), "n_unique_se_pcm": len(se_hashes), "manifest": str(Path(work_dir) / "se_manifest.jsonl") if jobs else None}
+    for raw in refs:
+        if raw.get("view") != "raw":
+            continue
+        pcm = raw.get("pcm_sha256")
+        if pcm in output_by_raw:
+            continue
+        row = dict(raw)
+        row.update({
+            "candidate_id": str(raw["candidate_id"]).replace("-raw-", "-moss48k-"),
+            "view": "moss48k",
+            "raw_parent_candidate_id": raw["candidate_id"],
+            "raw_parent_pcm_sha256": pcm,
+            "se_backend": backend,
+            "source_wav": None, "file_sha256": None, "pcm_sha256": None,
+            "canonical_id": None, "validity": "fatal_invalid",
+            "fatal_reason": raw.get("fatal_reason") or "raw_undecodable_skip_se",
+            "decode_ok": False, "export_placeholder": True,
+            "se_model_hash": mossformer_model_hash,
+            "inference_mode": "full_waveform",
+        })
+        views.append(row)
+        n_fail_refs += 1
+    meta = {
+        "backend": backend, "status": "complete",
+        "n_unique_raw": len(raw_ok), "n_views": len(views) - len(refs),
+        "n_unique_se_pcm": len(se_hashes), "n_se_failures": len(failures),
+        "n_failed_se_refs": n_fail_refs,
+        "failures": failures,
+        "manifest": str(Path(work_dir) / "se_manifest.jsonl") if jobs else None,
+        "signature_hash": json_hash(signature),
+        "mossformer_model_hash": mossformer_model_hash,
+        "inference_signature": inference_signature or backend,
+    }
     write_json(Path(work_dir) / "se_meta.json", meta)
+    write_json(meta_path, {"status": "complete", "signature": signature, "signature_hash": json_hash(signature), **{k: meta[k] for k in ("n_unique_raw", "n_unique_se_pcm", "n_se_failures")}})
     return views, meta

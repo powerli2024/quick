@@ -1,0 +1,26 @@
+{
+  "schema": "kws_s1_s7_moss_route_reason/v1",
+  "s1_arm": "s1_onnx_full",
+  "s7_arm": "s7_cv_then_onnx_gate/thr_a",
+  "cer_metric_zh": "toneless_pinyin_cer",
+  "cer_metric_en": "english_frozen_alias_cer",
+  "qkw_mode": "nll_unless_calibrator_frozen",
+  "qkw_low_thr": null,
+  "qkw_switch_margin": 0.01,
+  "nll_switch_margin": 0.01,
+  "speaker_switch_margin": 0.01,
+  "quality_regression_tolerance": 0.10,
+  "cer_accept_thr": null,
+  "acceptance": {
+    "expected_uid": 1838,
+    "mean_cer_max": 0.03,
+    "cer0_drop_max": 0.02,
+    "paired_cer_worsened_max": 0,
+    "downstream_required": ["cmd_frr_far", "extract_presence", "contest_score"]
+  },
+  "notes": [
+    "s7_arm=auto is forbidden on a frozen test run",
+    "SE cosine/CER pairing is diagnostic, not an eligibility gate",
+    "review_flat is not a production selected-only best_sep directory"
+  ]
+}
