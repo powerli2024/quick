@@ -12,14 +12,18 @@ EXPECTED_UIDS="${EXPECTED_UIDS:-0}"
 DEVICE="${DEVICE:-cuda:0}"
 SENSEVOICE_DIR="${SENSEVOICE_DIR:-/root/autodl-tmp/quick_models/a3/SenseVoiceSmall}"
 WENET_DIR="${WENET_DIR:-/root/autodl-tmp/quick_models/a3/wenet_aishell_u2pp_conformer_exp}"
-PRECOMPUTED_SE_DIR="${PRECOMPUTED_SE_DIR:-/root/autodl-tmp/kws_se48k}"
+PRECOMPUTED_SE_DIR="${PRECOMPUTED_SE_DIR:-/root/autodl-tmp/kws_se_route/se_wav}"
 
 if [[ ! -d "$SENSEVOICE_DIR" ]]; then
   echo "missing SenseVoice model: $SENSEVOICE_DIR (run scripts/download_a3_models.sh)" >&2
   exit 2
 fi
 
-ASR_COMMAND="${ASR_COMMAND:-python $QUICK_DIR/scripts/score_sensevoice_manifest.py --manifest {manifest} --output {output} --model-dir $SENSEVOICE_DIR --device $DEVICE}"
+if [[ -z "${ASR_COMMAND:-}" || "$ASR_COMMAND" != *"{manifest}"* || "$ASR_COMMAND" != *"{output}"* ]]; then
+  # Do not use ${VAR:-...} here: Bash treats braces in the default value as
+  # parameter-expansion syntax and turns {manifest} into {manifest.
+  ASR_COMMAND="python ${QUICK_DIR}/scripts/score_sensevoice_manifest.py --manifest {manifest} --output {output} --model-dir ${SENSEVOICE_DIR} --device ${DEVICE}"
+fi
 
 args=(
   "$QUICK_DIR/scripts/run_s1_s7_route.py"
@@ -37,7 +41,9 @@ args=(
 if [[ -n "${QKW_JSONL:-}" ]]; then
   args+=(--qkw-jsonl "$QKW_JSONL")
 else
-  WENET_DECODE_COMMAND="${WENET_DECODE_COMMAND:-python $QUICK_DIR/scripts/wenet_decode_manifest.py --manifest {manifest} --output {output} --model-dir $WENET_DIR --wenet-repo ${WENET_REPO:-/root/wenet}}"
+  if [[ -z "${WENET_DECODE_COMMAND:-}" ]]; then
+    WENET_DECODE_COMMAND="python ${QUICK_DIR}/scripts/wenet_decode_manifest.py --manifest {manifest} --output {output} --model-dir ${WENET_DIR} --wenet-repo ${WENET_REPO:-/root/wenet}"
+  fi
   QKW_COMMAND="python $QUICK_DIR/scripts/score_wenet_ctc_manifest.py --manifest {manifest} --output {output} --model-dir $WENET_DIR --decode-command \"$WENET_DECODE_COMMAND\" --enabled-langs ${WENET_ENABLED_LANGS:-zh}"
   args+=(--qkw-command "$QKW_COMMAND")
 fi

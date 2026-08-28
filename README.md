@@ -85,7 +85,7 @@ full-audio 根目录，`PRECOMPUTED_SE_DIR` 指向旧 SE 根目录；quick 会�
 
 ```bash
 POS_NEG=/root/autodl-tmp/kws_sep_fullaudio_v1 \
-PRECOMPUTED_SE_DIR=/root/autodl-tmp/kws_se48k \
+PRECOMPUTED_SE_DIR=/root/autodl-tmp/kws_se_route/se_wav \
 WENET_DECODE_COMMAND='python /root/your_wenet_decode.py --manifest {manifest} --output {output} --model-dir {model_dir}' \
 bash scripts/run_a3_route.sh
 ```
