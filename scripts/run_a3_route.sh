@@ -29,7 +29,7 @@ args=(
   "$QUICK_DIR/scripts/run_s1_s7_route.py"
   --pos-neg "$POS_NEG" --s1-arm "$S1_ARM" --s7-arm "$S7_ARM"
   --expected-uids "$EXPECTED_UIDS" --work-dir "$WORK_DIR"
-  --asr-command "$ASR_COMMAND" --asr-model-dir "$SENSEVOICE_DIR"
+  --asr-model-dir "$SENSEVOICE_DIR"
   --asr-context-mode none --qkw-switch-margin "${QKW_SWITCH_MARGIN:-0.01}"
   --alias-json "${ALIAS_JSON:-$QUICK_DIR/configs/english_alias.json}"
   --policy-json "${POLICY_JSON:-$QUICK_DIR/configs/route_policy.json}"
@@ -38,14 +38,36 @@ args=(
   --selected-only-dir "${SELECTED_ONLY_DIR:-$WORK_DIR/best_sep_selected}"
 )
 
+if [[ -n "${ASR_JSONL:-}" && -f "$ASR_JSONL" ]]; then
+  echo "[A3][reuse] SenseVoice sidecar: $ASR_JSONL" >&2
+  args+=(--asr-jsonl "$ASR_JSONL")
+else
+  args+=(--asr-command "$ASR_COMMAND")
+fi
+
 if [[ -n "${QKW_JSONL:-}" ]]; then
   args+=(--qkw-jsonl "$QKW_JSONL")
 else
-  if [[ -z "${WENET_DECODE_COMMAND:-}" ]]; then
-    WENET_DECODE_COMMAND="python ${QUICK_DIR}/scripts/wenet_decode_manifest.py --manifest {manifest} --output {output} --model-dir ${WENET_DIR} --wenet-repo ${WENET_REPO:-/root/wenet}"
+  WENET_READY=0
+  WENET_REPO_PATH="${WENET_REPO:-/root/wenet}"
+  if [[ -f "$WENET_REPO_PATH/wenet/bin/recognize.py" ]]; then
+    # The wrapper also checks that both files exist; this cheap probe avoids
+    # aborting after SenseVoice has already finished when CTC is unavailable.
+    WENET_CONFIG="$(find "$WENET_DIR" -type f -name train.yaml -print -quit 2>/dev/null || true)"
+    WENET_CHECKPOINT="$(find "$WENET_DIR" -type f -name final.pt -print -quit 2>/dev/null || true)"
+    if [[ -n "$WENET_CONFIG" && -n "$WENET_CHECKPOINT" ]]; then
+      WENET_READY=1
+    fi
   fi
-  QKW_COMMAND="python $QUICK_DIR/scripts/score_wenet_ctc_manifest.py --manifest {manifest} --output {output} --model-dir $WENET_DIR --decode-command \"$WENET_DECODE_COMMAND\" --enabled-langs ${WENET_ENABLED_LANGS:-zh}"
-  args+=(--qkw-command "$QKW_COMMAND")
+  if [[ -n "${WENET_DECODE_COMMAND:-}" || "$WENET_READY" == "1" ]]; then
+    if [[ -z "${WENET_DECODE_COMMAND:-}" ]]; then
+      WENET_DECODE_COMMAND="python ${QUICK_DIR}/scripts/wenet_decode_manifest.py --manifest {manifest} --output {output} --model-dir ${WENET_DIR} --wenet-repo ${WENET_REPO_PATH}"
+    fi
+    QKW_COMMAND="python $QUICK_DIR/scripts/score_wenet_ctc_manifest.py --manifest {manifest} --output {output} --model-dir $WENET_DIR --decode-command \"$WENET_DECODE_COMMAND\" --enabled-langs ${WENET_ENABLED_LANGS:-zh}"
+    args+=(--qkw-command "$QKW_COMMAND")
+  else
+    echo "[A3][WARN] WeNet CTC unavailable; continue with SenseVoice only (set QKW_JSONL or install model/source to enable CTC)" >&2
+  fi
 fi
 
 if [[ -d "$PRECOMPUTED_SE_DIR" ]]; then

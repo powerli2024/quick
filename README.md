@@ -94,6 +94,18 @@ bash scripts/run_a3_route.sh
 下载的 `train.yaml/final.pt`）；如使用其他解码器，`WENET_DECODE_COMMAND`
 必须产生 JSONL（`score_key`+`hyp`）或 Kaldi 风格 `key text` 文件。也可以直接给已有 CTC 转写：
 
+若 WeNet 权重或源码尚未就绪，`run_a3_route.sh` 会输出 warning 并继续完成
+SenseVoice + s1/s7/SE 选路，不会丢弃已生成的 ASR 缓存；安装完成后重新运行即可补上 CTC tie-breaker。
+
+若 SenseVoice 已经跑完但后续阶段失败，可直接复用已有 sidecar，避免重新识别：
+
+```bash
+ASR_JSONL=/root/autodl-tmp/kws_a3_route_v2/asr.jsonl \
+QKW_JSONL=/root/autodl-tmp/empty_qkw.jsonl \
+WORK_DIR=/root/autodl-tmp/kws_a3_route_v3 \
+bash scripts/run_a3_route.sh
+```
+
 ```bash
 QKW_JSONL=/root/autodl-tmp/wenet_decode.jsonl bash scripts/run_a3_route.sh
 ```
