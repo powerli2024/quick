@@ -23,7 +23,7 @@ cd /root/quick
 export POS_NEG=/root/autodl-tmp/kws_sep
 export WORK_DIR=/root/autodl-tmp/quick_s1_s7
 export AUDIO_CACHE_ROOT=/root/autodl-tmp/quick_audio_cache
-export MOSSFORMER_MODEL_HASH=<MossFormer2_SE_48K权重与配置的冻结hash>
+# 可选：有稳定权重 hash 时再设置；不设置也不阻断运行/I8
 export ASR_MODEL_DIR=/root/autodl-tmp/Qwen3-ASR-1.7B
 export S7_ARM=s7_cv_then_onnx_gate/thr_a   # 开发集锁定的精确标签
 export KWS_DIR=/root/kws
@@ -55,7 +55,7 @@ $AUDIO_CACHE_ROOT/
 ```
 
 - `sep_pcm` 是 s1/s7 分离结果的内容寻址副本；原始 extract-sep 文件不被修改。
-- `se48k` 由 backend、命令、MossFormer 模型 hash、推理签名和全长输出契约共同隔离，禁止不同模型混用。正式运行必须设置真实 `MOSSFORMER_MODEL_HASH`；缺失时脚本告警且 I8 不可能通过。
+- `se48k` 由 backend、命令、推理签名和全长输出契约隔离；`MOSSFORMER_MODEL_HASH` 仅作为可选 provenance 记录，不再作为 I8 硬门槛。更换 SE 模型时仍应使用新的 `INFERENCE_SIGNATURE` 或新的缓存目录。
 - 每轮在 `sep_audio_cache_manifest.jsonl`、`inventory_meta.json`、`se_meta.json` 和 `report.json` 记录 `hit/miss/fresh`。
 - 命中项仍校验 PCM、可解码性和 SE 前后时长；文件存在不等于自动信任。
 - `WORK_DIR` 只保存本轮清单、sidecar、评分、选路和导出；`input_signatures.json` 用于安全续跑，`signatures.json` 绑定最终评分证据。

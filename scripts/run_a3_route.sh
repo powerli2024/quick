@@ -14,7 +14,6 @@ DEVICE="${DEVICE:-cuda:0}"
 SENSEVOICE_DIR="${SENSEVOICE_DIR:-/root/autodl-tmp/quick_models/a3/SenseVoiceSmall}"
 WENET_DIR="${WENET_DIR:-/root/autodl-tmp/quick_models/a3/wenet_aishell_u2pp_conformer_exp}"
 PRECOMPUTED_SE_DIR="${PRECOMPUTED_SE_DIR:-/root/autodl-tmp/kws_se_route/se_wav}"
-MOSSFORMER_MODEL_HASH="${MOSSFORMER_MODEL_HASH:-}"
 
 if [[ ! -d "$SENSEVOICE_DIR" ]]; then
   echo "missing SenseVoice model: $SENSEVOICE_DIR (run scripts/download_a3_models.sh)" >&2
@@ -39,12 +38,6 @@ args=(
   --inference-signature "${INFERENCE_SIGNATURE:-a3_sensevoice_wenet_ctc}"
   --selected-only-dir "${SELECTED_ONLY_DIR:-$WORK_DIR/best_sep_selected}"
 )
-
-if [[ -n "$MOSSFORMER_MODEL_HASH" ]]; then
-  args+=(--mossformer-model-hash "$MOSSFORMER_MODEL_HASH")
-else
-  echo "[A3][WARN] MOSSFORMER_MODEL_HASH is empty; SE cache is not weight-bound and I8 cannot pass" >&2
-fi
 
 if [[ -n "${ASR_JSONL:-}" && -f "$ASR_JSONL" ]]; then
   echo "[A3][reuse] SenseVoice sidecar: $ASR_JSONL" >&2

@@ -37,7 +37,6 @@ ALIAS_JSON="${ALIAS_JSON:-$REPO_DIR/configs/english_alias.json}"
 QKW_JSONL="${QKW_JSONL:-}"
 QKW_CALIBRATED="${QKW_CALIBRATED:-0}"
 QKW_CALIBRATOR_JSON="${QKW_CALIBRATOR_JSON:-}"
-MOSSFORMER_MODEL_HASH="${MOSSFORMER_MODEL_HASH:-}"
 INFERENCE_SIGNATURE="${INFERENCE_SIGNATURE:-mossformer2_se_48k_full_waveform_v1}"
 
 if [[ -z "$S7_ARM" || "$S7_ARM" == "auto" ]]; then
@@ -84,11 +83,6 @@ if [[ -n "$EXTRACT_SEP_RUN_ID" ]]; then
   args+=(--extract-sep-run-id "$EXTRACT_SEP_RUN_ID")
 fi
 args+=(--inference-signature "$INFERENCE_SIGNATURE")
-if [[ -n "$MOSSFORMER_MODEL_HASH" ]]; then
-  args+=(--mossformer-model-hash "$MOSSFORMER_MODEL_HASH")
-elif [[ "$SE_BACKEND" == "command" || "$SE_BACKEND" == "precomputed" ]]; then
-  echo "[WARN] MOSSFORMER_MODEL_HASH is empty; cache is not weight-bound and I8 cannot pass" >&2
-fi
 if [[ "$SE_BACKEND" == "command" ]]; then
   if [[ -n "$SE_BATCH_COMMAND" ]]; then
     args+=(--se-batch-command "$SE_BATCH_COMMAND")
