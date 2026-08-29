@@ -46,7 +46,11 @@ else
 fi
 
 if [[ -n "${QKW_JSONL:-}" ]]; then
-  args+=(--qkw-jsonl "$QKW_JSONL")
+  if [[ -f "$QKW_JSONL" ]]; then
+    args+=(--qkw-jsonl "$QKW_JSONL")
+  else
+    echo "[A3][WARN] QKW_JSONL not found; continue without CTC sidecar: $QKW_JSONL" >&2
+  fi
 else
   WENET_READY=0
   WENET_REPO_PATH="${WENET_REPO:-/root/wenet}"
