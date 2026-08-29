@@ -77,6 +77,31 @@ def _materialize(source: Path, dest: Path) -> str:
         return "copy"
 
 
+def _find_se_companion(selected: dict[str, Any], group_rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Find the MossFormer view generated from the selected raw PCM."""
+    if selected.get("view") != "raw":
+        return selected if selected.get("source_wav") else None
+    sid = str(selected.get("candidate_id") or "")
+    spcm = selected.get("pcm_sha256")
+    matches = [
+        row for row in group_rows
+        if row.get("view") == "moss48k"
+        and row.get("source_wav")
+        and (
+            str(row.get("raw_parent_candidate_id") or "") == sid
+            or (spcm and row.get("raw_parent_pcm_sha256") == spcm)
+        )
+    ]
+    if not matches:
+        return None
+    # Prefer a rankable/finite-CER companion, then deterministic candidate id.
+    return min(matches, key=lambda row: (
+        0 if row.get("validity") == "rankable" and finite(row.get("cer_route")) is not None else 1,
+        float(row.get("cer_route")) if finite(row.get("cer_route")) is not None else float("inf"),
+        str(row.get("candidate_id") or ""),
+    ))
+
+
 def _candidate_json(row: dict[str, Any], export_name: str, slot: int, selected: bool, loss: str | None, mode: str) -> dict[str, Any]:
     return {
         "candidate_id": row["candidate_id"],
@@ -326,6 +351,8 @@ def export_flat(
                 switch_nll += 1
             elif code == "SWITCH_S7_EQUAL_CER_SPK_GAIN":
                 switch_spk += 1
+            elif code == "SWITCH_S7_CLOSE_CER_QUALITY_GAIN":
+                switch_spk += 1
         cer = finite(selected.get("cer_route"))
         if cer is not None:
             selected_cers.append(cer)
@@ -402,10 +429,29 @@ def export_flat(
             shutil.rmtree(dest_root)
         dest_root.mkdir(parents=True, exist_ok=True)
         selected_index: list[dict[str, Any]] = []
+        n_se_companion = 0
+        n_se_missing = 0
         for item in selected_rows:
             selected = item["selected"]
             dest = dest_root / item["split"] / f"{item['uid']}.wav"
             mode = _materialize(Path(selected["source_wav"]), dest)
+            companion = _find_se_companion(selected, by_group[f"{item['split']}\0{item['uid']}"])
+            se_dest = None
+            se_mode = None
+            if companion and companion.get("source_wav"):
+                if selected.get("view") == "raw":
+                    # Keep one row per UID for downstream compatibility; the
+                    # companion is a deterministic sidecar next to the main WAV.
+                    se_dest = dest.with_name(f"{item['uid']}__se.wav")
+                    se_mode = _materialize(Path(companion["source_wav"]), se_dest)
+                else:
+                    # The selected SE file is already the main artifact; do
+                    # not create a byte-identical duplicate.
+                    se_dest = dest
+                    se_mode = "selected_main"
+                n_se_companion += 1
+            else:
+                n_se_missing += 1
             selected_index.append({
                 "uid": item["uid"], "split": item["split"],
                 "dest_rel": str(dest.relative_to(dest_root)), "ok": True,
@@ -418,9 +464,25 @@ def export_flat(
                 "review_group_prefix": item["group_prefix"],
                 "route_reason_json": item["reason_name"],
                 "materialize_mode": mode,
+                "se_wav": str(se_dest.relative_to(dest_root)) if se_dest else None,
+                "se_source_wav": companion.get("source_wav") if companion else None,
+                "se_dest_rel": str(se_dest.relative_to(dest_root)) if se_dest else None,
+                "se_candidate_id": companion.get("candidate_id") if companion else None,
+                "se_pcm_sha256": companion.get("pcm_sha256") if companion else None,
+                "se_file_sha256": file_sha256(se_dest) if se_dest else None,
+                "se_view": "moss48k" if companion else None,
+                "se_materialize_mode": se_mode,
+                "se_is_selected": bool(selected.get("view") != "raw"),
+                "se_companion_missing": companion is None,
             })
         write_jsonl(selected_only_index or (dest_root / "index.jsonl"), selected_index)
         summary["selected_only_dir"] = str(dest_root.resolve())
+        summary["selected_only_se_companion"] = {
+            "n_with_se": n_se_companion,
+            "n_missing_se": n_se_missing,
+            "filename_suffix": "__se.wav",
+            "index_fields": ["se_wav", "se_source_wav", "se_candidate_id", "se_pcm_sha256", "se_file_sha256"],
+        }
         write_json(root / "ZZZZZZ__EXPORT_SUMMARY.json", summary)
     elif selected_only_dir is not None and failures:
         summary["selected_only_skipped"] = "FAIL_NO_DECODABLE_S1"

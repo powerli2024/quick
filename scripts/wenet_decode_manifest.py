@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -73,7 +74,16 @@ def main() -> int:
             "--result_dir", str(result), "--batch_size", str(args.batch_size),
             "--gpu", gpu if cuda else "-1", "--device", "cuda" if cuda else "cpu",
         ]
-        subprocess.run(cmd, check=True, cwd=str(args.wenet_repo))
+        proc = subprocess.run(
+            cmd, check=False, cwd=str(args.wenet_repo),
+            capture_output=True, text=True,
+        )
+        diagnostic = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        mismatch = bool(re.search(r"(?:missing tensor|unexpected tensor):", diagnostic))
+        if proc.returncode != 0 or mismatch:
+            reason = "checkpoint_architecture_mismatch" if mismatch else f"recognize_exit_{proc.returncode}"
+            print(f"[A3][WeNet] unavailable: {reason}; CTC sidecar will be empty", file=sys.stderr)
+            raise SystemExit(3)
         decoded = result / "ctc_greedy_search" / "text"
         if not decoded.is_file():
             raise SystemExit(f"WeNet did not create {decoded}")

@@ -65,6 +65,7 @@ def main() -> int:
     args = ap.parse_args()
 
     source = args.decode_jsonl
+    decoder_error = None
     if source is None and args.decode_command:
         rendered = str(args.decode_command)
         for name, value in {
@@ -72,14 +73,20 @@ def main() -> int:
             "model_dir": str(args.model_dir),
         }.items():
             rendered = rendered.replace("{" + name + "}", value)
-        subprocess.run(shlex.split(rendered, posix=os.name != "nt"), check=True)
-        source = args.output
-    if source is None:
+        try:
+            subprocess.run(shlex.split(rendered, posix=os.name != "nt"), check=True)
+            source = args.output
+        except subprocess.CalledProcessError as exc:
+            # CTC is an optional tie-breaker.  A checkpoint/config mismatch
+            # must not discard a completed SenseVoice/SE run.
+            decoder_error = f"decoder_exit_{exc.returncode}"
+            source = None
+    if source is None and decoder_error is None:
         raise SystemExit("A3 CTC needs --decode-command or --decode-jsonl")
-    if not source.is_file():
+    if source is not None and not source.is_file():
         raise SystemExit(f"WeNet decoder output not found: {source}")
 
-    decoded = _decode_rows(source)
+    decoded = _decode_rows(source) if source is not None else {}
     aliases = load_alias_table(args.alias_json)
     enabled_langs = {x.strip().lower() for x in str(args.enabled_langs).split(",") if x.strip()}
     unique = {}
@@ -102,7 +109,7 @@ def main() -> int:
             # 1-CER is deliberately a within-UID CTC alignment score, not a
             # cross-recording probability.  The route uses it only after CER
             # ties; calibration can later populate q_kw/qkw_calibrated.
-            align = max(0.0, min(1.0, 1.0 - float(metrics["cer_route"]))) if enabled else None
+            align = max(0.0, min(1.0, 1.0 - float(metrics["cer_route"]))) if enabled and decoder_error is None else None
             out = {
                 "score_key": sk,
                 "pcm_sha256": row.get("pcm_sha256"),
@@ -111,10 +118,11 @@ def main() -> int:
                 "hyp": hyp,
                 "ctc_hyp": hyp,
                 "ctc_align_score": align,
-                "target_coverage": metrics["wake_coverage"] if enabled else None,
+                "target_coverage": metrics["wake_coverage"] if enabled and decoder_error is None else None,
                 "ctc_cer_route": metrics["cer_route"],
-                "score_kind": "ctc_align_uncalibrated",
+                "score_kind": "ctc_align_uncalibrated" if decoder_error is None else "ctc_unavailable",
                 "backend": "wenet_ctc",
+                "error": decoder_error,
             }
             f.write(json.dumps(out, ensure_ascii=False) + "\n")
     print(f"[A3][WeNet-CTC] unique={len(unique)} missing={n_missing} output={args.output}", file=sys.stderr)

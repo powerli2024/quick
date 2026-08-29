@@ -53,6 +53,11 @@ class RunConfig:
     qkw_switch_margin: float | None = None
     nll_switch_margin: float | None = None
     speaker_switch_margin: float | None = None
+    cer_close_delta: float | None = None
+    noise_switch_margin: float | None = None
+    snr_switch_margin_db: float | None = None
+    dnsmos_switch_margin: float | None = None
+    prefer_se_on_close_cer: bool | None = None
     cer_accept_thr: float | None = None
     flat_dir: Path | None = None
     selected_only_dir: Path | None = None
@@ -184,6 +189,11 @@ def run(cfg: RunConfig) -> dict[str, Any]:
             "qkw_switch_margin": cfg.qkw_switch_margin,
             "nll_switch_margin": cfg.nll_switch_margin,
             "speaker_switch_margin": cfg.speaker_switch_margin,
+            "cer_close_delta": cfg.cer_close_delta,
+            "noise_switch_margin": cfg.noise_switch_margin,
+            "snr_switch_margin_db": cfg.snr_switch_margin_db,
+            "dnsmos_switch_margin": cfg.dnsmos_switch_margin,
+            "prefer_se_on_close_cer": cfg.prefer_se_on_close_cer,
             "cer_accept_thr": cfg.cer_accept_thr,
         },
     )
@@ -433,6 +443,11 @@ def run_from_args(args: Any) -> dict[str, Any]:
         policy_json=getattr(args, "policy_json", None),
         qkw_low_thr=args.qkw_low_thr, qkw_switch_margin=args.qkw_switch_margin,
         nll_switch_margin=args.nll_switch_margin, speaker_switch_margin=args.speaker_switch_margin,
+        cer_close_delta=getattr(args, "cer_close_delta", None),
+        noise_switch_margin=getattr(args, "noise_switch_margin", None),
+        snr_switch_margin_db=getattr(args, "snr_switch_margin_db", None),
+        dnsmos_switch_margin=getattr(args, "dnsmos_switch_margin", None),
+        prefer_se_on_close_cer=getattr(args, "prefer_se_on_close_cer", None),
         cer_accept_thr=args.cer_accept_thr, flat_dir=args.flat_dir,
         selected_only_dir=args.selected_only_dir,
         cmd_result_json=args.cmd_result_json, presence_result_json=args.presence_result_json,

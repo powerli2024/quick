@@ -27,6 +27,7 @@ REASON_CODES = (
     "SWITCH_S7_EQUAL_CER_CTC_GAIN",
     "SWITCH_S7_EQUAL_CER_NLL_GAIN",
     "SWITCH_S7_EQUAL_CER_SPK_GAIN",
+    "SWITCH_S7_CLOSE_CER_QUALITY_GAIN",
     "SWITCH_S7_S1_UNAVAILABLE",
     "AUDIT_FALLBACK_S1_RAW",
     "FAIL_NO_DECODABLE_S1",
@@ -44,6 +45,7 @@ REASON_TEXT = {
     "SWITCH_S7_EQUAL_CER_CTC_GAIN": "同 CER 下独立 CTC 已知词对齐分数显著改善",
     "SWITCH_S7_EQUAL_CER_NLL_GAIN": "未校准模式下，同 UID 同 CER 的 NLL 显著改善",
     "SWITCH_S7_EQUAL_CER_SPK_GAIN": "同 CER/文本证据下，独立声纹证据显著改善",
+    "SWITCH_S7_CLOSE_CER_QUALITY_GAIN": "CER 在允许的近似窗口内，SE/低噪声/高信噪比证据改善",
     "SWITCH_S7_S1_UNAVAILABLE": "s1 无 rankable 候选，使用 s7",
     "AUDIT_FALLBACK_S1_RAW": "无正常 winner，为审阅完整性回退到可解码 s1 raw",
     "FAIL_NO_DECODABLE_S1": "无法形成审阅 winner，整次导出失败",
@@ -60,6 +62,14 @@ class RoutePolicy:
     cer_accept_thr: float | None = None
     clip_rate_thr: float = 0.01
     min_speech_ratio: float = 0.05
+    # Production config may enable a bounded near-CER window.  Defaults keep
+    # the historical exact-CER behavior for callers that construct a policy
+    # directly (tests and third-party integrations).
+    cer_close_delta: float = 0.0
+    noise_switch_margin: float = 0.05
+    snr_switch_margin_db: float = 1.0
+    dnsmos_switch_margin: float = 0.20
+    prefer_se_on_close_cer: bool = False
 
 
 def _stream_key(value: Any) -> tuple[int, str]:
@@ -86,11 +96,13 @@ def candidate_key(row: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def _conservative_key(row: dict[str, Any]) -> tuple[Any, ...]:
+def _conservative_key(row: dict[str, Any], *, prefer_se: bool = False) -> tuple[Any, ...]:
     return (
-        0 if row.get("view") == "raw" else 1,
-        0 if row.get("stream") == "original" else 1,
+        # This is only the final deterministic tie-break.  It must not make
+        # raw/original win before CER and quality evidence have been compared.
+        (0 if row.get("view") == "moss48k" else 1) if prefer_se else (0 if row.get("view") == "raw" else 1),
         _stream_key(row.get("stream")),
+        0 if row.get("stream") == "original" else 1,
         str(row.get("candidate_id") or ""),
     )
 
@@ -131,6 +143,8 @@ def _view_reason(winner: dict[str, Any], candidates: list[dict[str, Any]], polic
         c_m, c_r = float(winner["cer_route"]), float(best_raw["cer_route"])
         if c_m < c_r - 1e-12:
             return "MOSS_LOWER_CER"
+        if abs(c_m - c_r) <= policy.cer_close_delta + 1e-12 and _quality_close_gain(winner, best_raw, policy):
+            return "MOSS_CLOSE_CER_QUALITY"
         qgain = _qkw_gain(winner, best_raw)
         if qgain is not None and qgain >= policy.qkw_switch_margin:
             return "MOSS_EQUAL_CER_QKW_GAIN"
@@ -164,7 +178,8 @@ def stage_winner(
     if not candidates:
         return None, {"role": role, "status": "no_rankable_candidate", "n_candidates": 0, "view_reason_code": None}
     min_cer = min(float(c["cer_route"]) for c in candidates)
-    pool = [c for c in candidates if abs(float(c["cer_route"]) - min_cer) <= 1e-12]
+    close_delta = max(0.0, float(policy.cer_close_delta or 0.0))
+    pool = [c for c in candidates if float(c["cer_route"]) <= min_cer + close_delta + 1e-12]
     if all(c.get("qkw_calibrated") and finite(c.get("q_kw")) is not None for c in pool):
         pool = _pool_by_score(pool, lambda r: finite(r.get("q_kw")), policy.qkw_switch_margin, higher_is_better=True)
     elif all(finite(c.get("keyword_score")) is not None for c in pool):
@@ -177,19 +192,34 @@ def stage_winner(
         pool = _pool_by_score(pool, lambda r: finite(r.get("speaker_ref_score")), policy.speaker_switch_margin, higher_is_better=True)
     if all(finite(c.get("extra_ratio")) is not None for c in pool):
         pool = _pool_by_score(pool, lambda r: finite(r.get("extra_ratio")), policy.quality_regression_tolerance, higher_is_better=False)
-    overlaps = [finite((c.get("audio_quality") or {}).get("p_overlap")) for c in pool]
-    if all(v is not None for v in overlaps):
-        pool = _pool_by_score(
-            pool,
-            lambda r: finite((r.get("audio_quality") or {}).get("p_overlap")),
-            policy.quality_regression_tolerance,
-            higher_is_better=False,
-        )
-    winner = min(pool, key=_conservative_key)
+    # Noise/quality evidence is intentionally applied after the CER window.
+    # Lower probabilities/rates are cleaner; higher SNR/DNSMOS is cleaner.
+    for key, margin, higher in (
+        ("p_music", policy.noise_switch_margin, False),
+        ("p_overlap", policy.noise_switch_margin, False),
+        ("clip_rate", policy.quality_regression_tolerance, False),
+        ("snr_vad_db", policy.snr_switch_margin_db, True),
+        ("dnsmos_ovrl", policy.dnsmos_switch_margin, True),
+    ):
+        if all(finite((c.get("audio_quality") or {}).get(key)) is not None for c in pool):
+            pool = _pool_by_score(
+                pool,
+                lambda r, k=key: finite((r.get("audio_quality") or {}).get(k)),
+                margin,
+                higher_is_better=higher,
+            )
+    if policy.prefer_se_on_close_cer and close_delta > 0 and len(pool) > 1:
+        se_pool = [c for c in pool if c.get("view") == "moss48k"]
+        if se_pool:
+            pool = se_pool
+    winner = min(pool, key=lambda row: _conservative_key(row, prefer_se=bool(policy.prefer_se_on_close_cer and close_delta > 0)))
     return winner, {
         "role": role,
         "status": "selected",
         "n_candidates": len(candidates),
+        "min_cer": min_cer,
+        "cer_close_delta": close_delta,
+        "n_cer_close": sum(1 for c in candidates if float(c["cer_route"]) <= min_cer + close_delta + 1e-12),
         "n_l1_tied": len(pool),
         "winner": winner["candidate_id"],
         "winner_cer_route": winner["cer_route"],
@@ -237,6 +267,30 @@ def _quality_not_worse(new: dict[str, Any], old: dict[str, Any], tolerance: floa
         if n is not None and o is not None and n > o + tolerance:
             return False
     return True
+
+
+def _quality_close_gain(new: dict[str, Any], old: dict[str, Any], policy: RoutePolicy) -> bool:
+    """Require an explicit, auditable quality gain for near-CER switching."""
+    nq, oq = new.get("audio_quality") or {}, old.get("audio_quality") or {}
+    lower_better = (
+        ("p_music", policy.noise_switch_margin),
+        ("p_overlap", policy.noise_switch_margin),
+        ("clip_rate", policy.quality_regression_tolerance),
+    )
+    higher_better = (
+        ("snr_vad_db", policy.snr_switch_margin_db),
+        ("dnsmos_ovrl", policy.dnsmos_switch_margin),
+    )
+    gains: list[bool] = []
+    for key, margin in lower_better:
+        n, o = finite(nq.get(key)), finite(oq.get(key))
+        if n is not None and o is not None:
+            gains.append(o - n >= margin)
+    for key, margin in higher_better:
+        n, o = finite(nq.get(key)), finite(oq.get(key))
+        if n is not None and o is not None:
+            gains.append(n - o >= margin)
+    return bool(gains) and any(gains) and _quality_not_worse(new, old, policy.quality_regression_tolerance)
 
 
 def trigger_s7(w1: dict[str, Any] | None, policy: RoutePolicy) -> tuple[bool, list[str]]:
@@ -331,6 +385,12 @@ def route_uid(rows: Iterable[dict[str, Any]], policy: RoutePolicy) -> dict[str, 
                 selected, switched, reason = w7, True, "SWITCH_S7_EQUAL_CER_NLL_GAIN"
             elif sgain is not None and sgain >= policy.speaker_switch_margin and _quality_not_worse(w7, w1, policy.quality_regression_tolerance):
                 selected, switched, reason = w7, True, "SWITCH_S7_EQUAL_CER_SPK_GAIN"
+            elif (
+                policy.cer_close_delta > 0
+                and abs(c7 - c1) <= policy.cer_close_delta + 1e-12
+                and _quality_close_gain(w7, w1, policy)
+            ):
+                selected, switched, reason = w7, True, "SWITCH_S7_CLOSE_CER_QUALITY_GAIN"
             else:
                 selected, reason = w1, "KEEP_S1_TIE_NO_GAIN"
             trace.append({

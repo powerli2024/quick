@@ -1,6 +1,7 @@
 # quick：s1/s7 + MossFormer SE 严格选路（AutoDL Linux）
 
 `quick` 按 [`docs/S1_S7选路与平铺审阅导出方案.md`](docs/S1_S7选路与平铺审阅导出方案.md) 落地 I0–I8。
+当前代码逐条执行逻辑、两种 q_kw 模式和合理性审查见 [`docs/当前选路逻辑与合理性审查.md`](docs/当前选路逻辑与合理性审查.md)。
 输入约定对齐 `kws` 的 extract-sep 目录；ASR / NLL / embedding / MossFormer 通过 sidecar 或
 command 复用 `/root/kws` 与 `/root/extract-main`，不修改 kws。
 
@@ -146,6 +147,7 @@ bash scripts/run_a3_route.sh
 
 若 WeNet 权重或源码尚未就绪，`run_a3_route.sh` 会输出 warning 并继续完成
 SenseVoice + s1/s7/SE 选路，不会丢弃已生成的 ASR 缓存；安装完成后重新运行即可补上 CTC tie-breaker。
+已知 checkpoint 配置不兼容时可设置 `DISABLE_CTC=1`，强制只跑 SenseVoice 主链。
 
 若 SenseVoice 已经跑完但后续阶段失败，可直接复用已有 sidecar，避免重新识别：
 

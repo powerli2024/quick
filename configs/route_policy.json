@@ -10,6 +10,11 @@
   "nll_switch_margin": 0.01,
   "speaker_switch_margin": 0.01,
   "quality_regression_tolerance": 0.10,
+  "cer_close_delta": 0.02,
+  "noise_switch_margin": 0.05,
+  "snr_switch_margin_db": 1.0,
+  "dnsmos_switch_margin": 0.20,
+  "prefer_se_on_close_cer": true,
   "cer_accept_thr": null,
   "acceptance": {
     "expected_uid": 1838,

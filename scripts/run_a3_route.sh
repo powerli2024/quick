@@ -11,19 +11,56 @@ S1_ARM="${S1_ARM:-s1_onnx_full}"
 S7_ARM="${S7_ARM:-s7_cv_then_onnx_gate/thr_a}"
 EXPECTED_UIDS="${EXPECTED_UIDS:-0}"
 DEVICE="${DEVICE:-cuda:0}"
+ASR_BACKEND="${ASR_BACKEND:-sensevoice}"
 SENSEVOICE_DIR="${SENSEVOICE_DIR:-/root/autodl-tmp/quick_models/a3/SenseVoiceSmall}"
+PARAFORMER_ZH_DIR="${PARAFORMER_ZH_DIR:-/root/autodl-tmp/quick_models/a3/Paraformer-zh}"
+PARAFORMER_EN_DIR="${PARAFORMER_EN_DIR:-/root/autodl-tmp/quick_models/a3/Paraformer-en}"
 WENET_DIR="${WENET_DIR:-/root/autodl-tmp/quick_models/a3/wenet_aishell_u2pp_conformer_exp}"
 PRECOMPUTED_SE_DIR="${PRECOMPUTED_SE_DIR:-/root/autodl-tmp/kws_se_route/se_wav}"
 
-if [[ ! -d "$SENSEVOICE_DIR" ]]; then
-  echo "missing SenseVoice model: $SENSEVOICE_DIR (run scripts/download_a3_models.sh)" >&2
+if [[ "$ASR_BACKEND" == "sensevoice" ]]; then
+  if [[ ! -d "$SENSEVOICE_DIR" ]]; then
+    echo "missing SenseVoice model: $SENSEVOICE_DIR (run scripts/download_a3_models.sh)" >&2
+    exit 2
+  fi
+elif [[ "$ASR_BACKEND" == "paraformer" ]]; then
+  if [[ ! -d "$PARAFORMER_ZH_DIR" || ! -d "$PARAFORMER_EN_DIR" ]]; then
+    echo "missing Paraformer zh/en model dirs: $PARAFORMER_ZH_DIR / $PARAFORMER_EN_DIR" >&2
+    echo "run scripts/download_a3_models.sh or set PARAFORMER_ZH_DIR/PARAFORMER_EN_DIR" >&2
+    exit 2
+  fi
+else
+  echo "unsupported ASR_BACKEND=$ASR_BACKEND (choose sensevoice or paraformer)" >&2
   exit 2
 fi
 
 if [[ -z "${ASR_COMMAND:-}" || "$ASR_COMMAND" != *"{manifest}"* || "$ASR_COMMAND" != *"{output}"* ]]; then
   # Do not use ${VAR:-...} here: Bash treats braces in the default value as
   # parameter-expansion syntax and turns {manifest} into {manifest.
-  ASR_COMMAND="python ${QUICK_DIR}/scripts/score_sensevoice_manifest.py --manifest {manifest} --output {output} --model-dir ${SENSEVOICE_DIR} --device ${DEVICE}"
+  if [[ "$ASR_BACKEND" == "paraformer" ]]; then
+    ASR_COMMAND="python ${QUICK_DIR}/scripts/score_paraformer_manifest.py --manifest {manifest} --output {output} --zh-model-dir ${PARAFORMER_ZH_DIR} --en-model-dir ${PARAFORMER_EN_DIR} --device ${DEVICE}"
+  else
+    ASR_COMMAND="python ${QUICK_DIR}/scripts/score_sensevoice_manifest.py --manifest {manifest} --output {output} --model-dir ${SENSEVOICE_DIR} --device ${DEVICE}"
+  fi
+fi
+if [[ "$ASR_BACKEND" == "paraformer" ]]; then
+  ASR_MODEL_DIR="$PARAFORMER_ZH_DIR"
+  if [[ -z "${ASR_MODEL_HASH:-}" ]]; then
+    ASR_MODEL_HASH="$(PYTHONPATH="${QUICK_DIR}/src" python - "$PARAFORMER_ZH_DIR" "$PARAFORMER_EN_DIR" <<'PY'
+import hashlib, sys
+from quick.signatures import hash_model_dir
+h = hashlib.sha256()
+for path in sys.argv[1:]:
+    h.update(path.encode())
+    h.update(b"\0")
+    h.update((hash_model_dir(path) or "missing").encode())
+    h.update(b"\n")
+print(h.hexdigest())
+PY
+)"
+  fi
+else
+  ASR_MODEL_DIR="$SENSEVOICE_DIR"
 fi
 
 args=(
@@ -31,22 +68,27 @@ args=(
   --pos-neg "$POS_NEG" --s1-arm "$S1_ARM" --s7-arm "$S7_ARM"
   --expected-uids "$EXPECTED_UIDS" --work-dir "$WORK_DIR"
   --audio-cache-root "$AUDIO_CACHE_ROOT"
-  --asr-model-dir "$SENSEVOICE_DIR"
+  --asr-model-dir "$ASR_MODEL_DIR"
   --asr-context-mode none --qkw-switch-margin "${QKW_SWITCH_MARGIN:-0.01}"
   --alias-json "${ALIAS_JSON:-$QUICK_DIR/configs/english_alias.json}"
   --policy-json "${POLICY_JSON:-$QUICK_DIR/configs/route_policy.json}"
-  --inference-signature "${INFERENCE_SIGNATURE:-a3_sensevoice_wenet_ctc}"
+  --inference-signature "${INFERENCE_SIGNATURE:-a3_${ASR_BACKEND}_ctc_optional}"
   --selected-only-dir "${SELECTED_ONLY_DIR:-$WORK_DIR/best_sep_selected}"
 )
+if [[ -n "${ASR_MODEL_HASH:-}" ]]; then
+  args+=(--asr-model-hash "$ASR_MODEL_HASH")
+fi
 
 if [[ -n "${ASR_JSONL:-}" && -f "$ASR_JSONL" ]]; then
-  echo "[A3][reuse] SenseVoice sidecar: $ASR_JSONL" >&2
+  echo "[A3][reuse] $ASR_BACKEND sidecar: $ASR_JSONL" >&2
   args+=(--asr-jsonl "$ASR_JSONL")
 else
   args+=(--asr-command "$ASR_COMMAND")
 fi
 
-if [[ -n "${QKW_JSONL:-}" ]]; then
+if [[ "${ENABLE_CTC:-0}" != "1" || "${DISABLE_CTC:-0}" == "1" ]]; then
+  echo "[A3][INFO] WeNet CTC disabled by default; continue with $ASR_BACKEND (set ENABLE_CTC=1 only with a matched model/repo)" >&2
+elif [[ -n "${QKW_JSONL:-}" ]]; then
   if [[ -f "$QKW_JSONL" ]]; then
     args+=(--qkw-jsonl "$QKW_JSONL")
   else
@@ -71,7 +113,7 @@ else
     QKW_COMMAND="python $QUICK_DIR/scripts/score_wenet_ctc_manifest.py --manifest {manifest} --output {output} --model-dir $WENET_DIR --decode-command \"$WENET_DECODE_COMMAND\" --enabled-langs ${WENET_ENABLED_LANGS:-zh}"
     args+=(--qkw-command "$QKW_COMMAND")
   else
-    echo "[A3][WARN] WeNet CTC unavailable; continue with SenseVoice only (set QKW_JSONL or install model/source to enable CTC)" >&2
+    echo "[A3][WARN] WeNet CTC unavailable; continue with $ASR_BACKEND only (set QKW_JSONL or install a matched model/source to enable CTC)" >&2
   fi
 fi
 
