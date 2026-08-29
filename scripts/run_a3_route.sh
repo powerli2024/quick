@@ -6,6 +6,7 @@ set -euo pipefail
 QUICK_DIR="${QUICK_DIR:-/root/quick}"
 POS_NEG="${POS_NEG:?set POS_NEG to the extract-sep full-audio root}"
 WORK_DIR="${WORK_DIR:-/root/autodl-tmp/kws_a3_route}"
+AUDIO_CACHE_ROOT="${AUDIO_CACHE_ROOT:-/root/autodl-tmp/quick_audio_cache}"
 S1_ARM="${S1_ARM:-s1_onnx_full}"
 S7_ARM="${S7_ARM:-s7_cv_then_onnx_gate/thr_a}"
 EXPECTED_UIDS="${EXPECTED_UIDS:-0}"
@@ -13,6 +14,7 @@ DEVICE="${DEVICE:-cuda:0}"
 SENSEVOICE_DIR="${SENSEVOICE_DIR:-/root/autodl-tmp/quick_models/a3/SenseVoiceSmall}"
 WENET_DIR="${WENET_DIR:-/root/autodl-tmp/quick_models/a3/wenet_aishell_u2pp_conformer_exp}"
 PRECOMPUTED_SE_DIR="${PRECOMPUTED_SE_DIR:-/root/autodl-tmp/kws_se_route/se_wav}"
+MOSSFORMER_MODEL_HASH="${MOSSFORMER_MODEL_HASH:-}"
 
 if [[ ! -d "$SENSEVOICE_DIR" ]]; then
   echo "missing SenseVoice model: $SENSEVOICE_DIR (run scripts/download_a3_models.sh)" >&2
@@ -29,14 +31,20 @@ args=(
   "$QUICK_DIR/scripts/run_s1_s7_route.py"
   --pos-neg "$POS_NEG" --s1-arm "$S1_ARM" --s7-arm "$S7_ARM"
   --expected-uids "$EXPECTED_UIDS" --work-dir "$WORK_DIR"
+  --audio-cache-root "$AUDIO_CACHE_ROOT"
   --asr-model-dir "$SENSEVOICE_DIR"
   --asr-context-mode none --qkw-switch-margin "${QKW_SWITCH_MARGIN:-0.01}"
   --alias-json "${ALIAS_JSON:-$QUICK_DIR/configs/english_alias.json}"
   --policy-json "${POLICY_JSON:-$QUICK_DIR/configs/route_policy.json}"
-  --mossformer-model-hash "${MOSSFORMER_MODEL_HASH:-a3_reused_precomputed_se}"
   --inference-signature "${INFERENCE_SIGNATURE:-a3_sensevoice_wenet_ctc}"
   --selected-only-dir "${SELECTED_ONLY_DIR:-$WORK_DIR/best_sep_selected}"
 )
+
+if [[ -n "$MOSSFORMER_MODEL_HASH" ]]; then
+  args+=(--mossformer-model-hash "$MOSSFORMER_MODEL_HASH")
+else
+  echo "[A3][WARN] MOSSFORMER_MODEL_HASH is empty; SE cache is not weight-bound and I8 cannot pass" >&2
+fi
 
 if [[ -n "${ASR_JSONL:-}" && -f "$ASR_JSONL" ]]; then
   echo "[A3][reuse] SenseVoice sidecar: $ASR_JSONL" >&2
@@ -72,6 +80,14 @@ else
   else
     echo "[A3][WARN] WeNet CTC unavailable; continue with SenseVoice only (set QKW_JSONL or install model/source to enable CTC)" >&2
   fi
+fi
+
+if [[ "${QKW_CALIBRATED:-0}" == "1" ]]; then
+  if [[ -z "${QKW_JSONL:-}" || ! -f "$QKW_JSONL" || -z "${QKW_CALIBRATOR_JSON:-}" || ! -f "$QKW_CALIBRATOR_JSON" ]]; then
+    echo "[A3][ERR] QKW_CALIBRATED=1 requires complete QKW_JSONL and QKW_CALIBRATOR_JSON" >&2
+    exit 2
+  fi
+  args+=(--qkw-calibrated --qkw-calibrator-json "$QKW_CALIBRATOR_JSON")
 fi
 
 if [[ -d "$PRECOMPUTED_SE_DIR" ]]; then

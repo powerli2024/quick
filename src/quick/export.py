@@ -100,7 +100,8 @@ def _candidate_json(row: dict[str, Any], export_name: str, slot: int, selected: 
         "fatal_reason": row.get("fatal_reason"),
         "asr": {k: row.get(k) for k in (
             "hyp", "cer_route", "cer_char", "cer_py", "cer_alias", "alias_hit",
-            "wake_coverage", "extra_ratio", "core_hit", "nll", "q_kw", "score_kind",
+            "wake_coverage", "extra_ratio", "core_hit", "nll", "q_kw", "keyword_score",
+            "keyword_score_kind", "qkw_calibrator_hash", "score_kind",
         )},
         "se": {
             "backend": row.get("se_backend"),
@@ -242,6 +243,11 @@ def export_flat(
                 "stream": row.get("stream"), "view": view, "pcm_sha256": row.get("pcm_sha256"),
                 "cer_route": row.get("cer_route"),
                 "q_kw_or_nll": row.get("q_kw") if row.get("qkw_calibrated") else row.get("nll"),
+                "q_kw": row.get("q_kw"),
+                "qkw_calibrator_hash": row.get("qkw_calibrator_hash"),
+                "keyword_score": row.get("keyword_score"),
+                "keyword_score_kind": row.get("keyword_score_kind"),
+                "nll": row.get("nll"),
                 "content_class": row.get("content_class"), "validity": row.get("validity"),
                 "loss_reason": loss,
             })

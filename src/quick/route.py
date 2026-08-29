@@ -325,7 +325,7 @@ def route_uid(rows: Iterable[dict[str, Any]], policy: RoutePolicy) -> dict[str, 
             sgain = _speaker_gain(w7, w1)
             if qgain is not None and qgain >= policy.qkw_switch_margin:
                 selected, switched, reason = w7, True, "SWITCH_S7_EQUAL_CER_QKW_GAIN"
-            elif kgain is not None and kgain >= policy.qkw_switch_margin:
+            elif qgain is None and kgain is not None and kgain >= policy.qkw_switch_margin:
                 selected, switched, reason = w7, True, "SWITCH_S7_EQUAL_CER_CTC_GAIN"
             elif qgain is None and ngain is not None and ngain >= policy.nll_switch_margin:
                 selected, switched, reason = w7, True, "SWITCH_S7_EQUAL_CER_NLL_GAIN"

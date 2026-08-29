@@ -15,6 +15,7 @@ KWS_DIR="${KWS_DIR:-/root/kws}"
 KWS_SRC="${KWS_SRC:-$KWS_DIR/src}"
 POS_NEG="${POS_NEG:-/root/autodl-tmp/kws_sep}"
 WORK_DIR="${WORK_DIR:-/root/autodl-tmp/quick_s1_s7}"
+AUDIO_CACHE_ROOT="${AUDIO_CACHE_ROOT:-/root/autodl-tmp/quick_audio_cache}"
 ASR_MODEL_DIR="${ASR_MODEL_DIR:-/root/autodl-tmp/Qwen3-ASR-1.7B}"
 EXTRACT_MAIN="${EXTRACT_MAIN:-/root/extract-main}"
 CLEARVOICE_ROOT="${CLEARVOICE_ROOT:-/root/autodl-tmp/ClearerVoice-Studio}"
@@ -33,6 +34,11 @@ WITH_EMBED="${WITH_EMBED:-0}"
 ASR_CONTEXT_MODE="${ASR_CONTEXT_MODE:-wake}"
 EXTRACT_SEP_RUN_ID="${EXTRACT_SEP_RUN_ID:-}"
 ALIAS_JSON="${ALIAS_JSON:-$REPO_DIR/configs/english_alias.json}"
+QKW_JSONL="${QKW_JSONL:-}"
+QKW_CALIBRATED="${QKW_CALIBRATED:-0}"
+QKW_CALIBRATOR_JSON="${QKW_CALIBRATOR_JSON:-}"
+MOSSFORMER_MODEL_HASH="${MOSSFORMER_MODEL_HASH:-}"
+INFERENCE_SIGNATURE="${INFERENCE_SIGNATURE:-mossformer2_se_48k_full_waveform_v1}"
 
 if [[ -z "$S7_ARM" || "$S7_ARM" == "auto" ]]; then
   echo "[ERR] lock S7_ARM to an exact pos/neg-identical label; auto is forbidden" >&2
@@ -62,6 +68,7 @@ args=(
   python scripts/run_s1_s7_route.py
   --pos-neg "$POS_NEG"
   --work-dir "$WORK_DIR"
+  --audio-cache-root "$AUDIO_CACHE_ROOT"
   --s1-arm "$S1_ARM"
   --s7-arm "$S7_ARM"
   --expected-uids "$EXPECTED_UIDS"
@@ -75,6 +82,12 @@ args=(
 
 if [[ -n "$EXTRACT_SEP_RUN_ID" ]]; then
   args+=(--extract-sep-run-id "$EXTRACT_SEP_RUN_ID")
+fi
+args+=(--inference-signature "$INFERENCE_SIGNATURE")
+if [[ -n "$MOSSFORMER_MODEL_HASH" ]]; then
+  args+=(--mossformer-model-hash "$MOSSFORMER_MODEL_HASH")
+elif [[ "$SE_BACKEND" == "command" || "$SE_BACKEND" == "precomputed" ]]; then
+  echo "[WARN] MOSSFORMER_MODEL_HASH is empty; cache is not weight-bound and I8 cannot pass" >&2
 fi
 if [[ "$SE_BACKEND" == "command" ]]; then
   if [[ -n "$SE_BATCH_COMMAND" ]]; then
@@ -95,6 +108,17 @@ if [[ "$WITH_NLL" == "1" ]]; then
 fi
 if [[ "$WITH_EMBED" == "1" ]]; then
   args+=(--embedding-command "python ${REPO_DIR}/scripts/score_embed_manifest.py --manifest {manifest} --output {output} --device ${DEVICE}")
+fi
+if [[ -n "$QKW_JSONL" ]]; then
+  test -f "$QKW_JSONL"
+  args+=(--qkw-jsonl "$QKW_JSONL")
+fi
+if [[ "$QKW_CALIBRATED" == "1" ]]; then
+  if [[ -z "$QKW_JSONL" || -z "$QKW_CALIBRATOR_JSON" || ! -f "$QKW_CALIBRATOR_JSON" ]]; then
+    echo "[ERR] QKW_CALIBRATED=1 requires complete QKW_JSONL and QKW_CALIBRATOR_JSON" >&2
+    exit 1
+  fi
+  args+=(--qkw-calibrated --qkw-calibrator-json "$QKW_CALIBRATOR_JSON")
 fi
 if [[ -n "${CMD_RESULT_JSON:-}" ]]; then
   args+=(--cmd-result-json "$CMD_RESULT_JSON")
@@ -119,8 +143,12 @@ import json, sys
 path, expected = sys.argv[1], int(sys.argv[2])
 report = json.load(open(path, encoding="utf-8"))
 local = report["phases"]["I4_I5_local"]
+sep = report["phases"]["I1_inventory"]["audio_cache"]
+se = report["phases"]["I2_se"]
 assert local["n_uid"] == expected, local
 assert report["production_approved"] is False or report["status"] == "PASS"
+print("[SEP_REUSE] hit/miss/fresh", sep["n_cache_hit"], sep["n_cache_miss"], sep["n_fresh"], sep["root"])
+print("[SE_REUSE] hit/miss/fresh", se.get("n_cache_hit"), se.get("n_cache_miss"), se.get("n_fresh"), se.get("cache_root"))
 print("[OK]", report["status"], "uid", local["n_uid"], "flat", report["paths"]["flat_dir"])
 PY
 

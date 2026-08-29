@@ -22,6 +22,8 @@ python scripts/run_s1_s7_route.py --help
 cd /root/quick
 export POS_NEG=/root/autodl-tmp/kws_sep
 export WORK_DIR=/root/autodl-tmp/quick_s1_s7
+export AUDIO_CACHE_ROOT=/root/autodl-tmp/quick_audio_cache
+export MOSSFORMER_MODEL_HASH=<MossFormer2_SE_48K权重与配置的冻结hash>
 export ASR_MODEL_DIR=/root/autodl-tmp/Qwen3-ASR-1.7B
 export S7_ARM=s7_cv_then_onnx_gate/thr_a   # 开发集锁定的精确标签
 export KWS_DIR=/root/kws
@@ -40,8 +42,56 @@ bash scripts/run_s1_s7_route.sh
 6. I8 `PASS` 要求生产 SE（command/precomputed）+ 带 schema/bindings/UID 指纹/逐语言指标的 CMD/Presence/contest JSON
 
 摸底闭环（不跑神经 SE）可设 `SE_BACKEND=spectral`。中断后续跑保持同一 `WORK_DIR` 并 `RESUME=1`。
+也可以换新的 `WORK_DIR`：只要 `AUDIO_CACHE_ROOT` 和 SE 模型/推理签名不变，音频仍会命中固定缓存。
 
-正式门还要求：`n_selected_finite_cer = n_baseline_finite_cer = n_paired = expected_uid`，且禁止 audit_fallback / missing ASR。`--qkw-calibrated` 必须同时提供 `--qkw-calibrator-hash`。策略默认读 `configs/route_policy.json`，可用 `--policy-json` 覆盖。
+## 固定音频缓存契约
+
+正式脚本默认使用 `/root/autodl-tmp/quick_audio_cache`，也可显式设置 `AUDIO_CACHE_ROOT`。目录不再依赖某一轮 `WORK_DIR`：
+
+```text
+$AUDIO_CACHE_ROOT/
+├── sep_pcm/<pcm前2位>/<pcm_sha256>.wav
+└── se48k/<SE变换签名>/<raw_pcm前2位>/<raw_pcm_sha256>.wav
+```
+
+- `sep_pcm` 是 s1/s7 分离结果的内容寻址副本；原始 extract-sep 文件不被修改。
+- `se48k` 由 backend、命令、MossFormer 模型 hash、推理签名和全长输出契约共同隔离，禁止不同模型混用。正式运行必须设置真实 `MOSSFORMER_MODEL_HASH`；缺失时脚本告警且 I8 不可能通过。
+- 每轮在 `sep_audio_cache_manifest.jsonl`、`inventory_meta.json`、`se_meta.json` 和 `report.json` 记录 `hit/miss/fresh`。
+- 命中项仍校验 PCM、可解码性和 SE 前后时长；文件存在不等于自动信任。
+- `WORK_DIR` 只保存本轮清单、sidecar、评分、选路和导出；`input_signatures.json` 用于安全续跑，`signatures.json` 绑定最终评分证据。
+
+正式门还要求：`n_selected_finite_cer = n_baseline_finite_cer = n_paired = expected_uid`，且禁止 audit_fallback / missing ASR。策略默认读 `configs/route_policy.json`，可用 `--policy-json` 覆盖。
+
+## q_kw 的正式契约
+
+`q_kw` 是“目标唤醒词存在”的校准概率，不等于 `1-CER`、CTC 对齐分、ASR 置信度或 `-NLL`。正式启用时必须同时满足：
+
+1. 校准数据来自与最终验收集隔离的开发集，标签固定为 `1=目标唤醒词存在`、`0=不存在`；中文和英文分别拟合。
+2. 对本轮每个 unique `(pcm_sha256, wake_text, lang)` 都有一条记录，不能只覆盖容易样本。
+3. 每条记录包含 `score_kind=calibrated_qkw`、`0<=q_kw<=1`，以及相同的 `qkw_calibrator_hash`。
+4. 运行时给出的校准器 hash 必须逐条匹配；任一缺失、越界或签名不一致直接终止。
+5. 未启用 `--qkw-calibrated` 时，即使 sidecar 自称带 `q_kw`，该值也不会进入选路。未校准 CTC/NLL 只允许在同 UID、同 CER 下按冻结 margin 破同分，不能使用跨 UID 绝对阈值。
+
+拟合和应用冻结校准器：
+
+```bash
+python scripts/calibrate_qkw.py \
+  --input /root/autodl-tmp/qkw_dev_labeled.jsonl \
+  --output /root/autodl-tmp/qkw_calibrator.json \
+  --score-field ctc_align_score
+
+python scripts/apply_qkw_calibrator.py \
+  --input /root/autodl-tmp/wenet_ctc_scores.jsonl \
+  --calibrator /root/autodl-tmp/qkw_calibrator.json \
+  --output /root/autodl-tmp/qkw_calibrated.jsonl
+
+python scripts/run_s1_s7_route.py ... \
+  --qkw-jsonl /root/autodl-tmp/qkw_calibrated.jsonl \
+  --qkw-calibrated \
+  --qkw-calibrator-json /root/autodl-tmp/qkw_calibrator.json
+```
+
+如果原始分数是 NLL，拟合时增加 `--score-field nll --lower-is-better`。`report.json` 的 `I3_score` 必须显示 `qkw_valid=qkw_expected` 且 `qkw_coverage=1.0`，否则不可使用 q_kw 结论。
 
 ## 输入约定
 
@@ -54,8 +104,8 @@ index 至少要有 `uid`、`wake_text`（兼容 `唤醒文本`/`wake`/`text`）�
 | 阶段 | 产物 |
 |---|---|
 | I0 | `signatures.json` |
-| I1 | `file_sha256` + `pcm_sha256` registry |
-| I2 | unique raw 一次 SE；失败写 8000 占位 JSON |
+| I1 | `file_sha256` + `pcm_sha256` registry，并物化固定 `sep_pcm` 缓存 |
+| I2 | unique raw 一次 SE，写入模型签名隔离的固定 `se48k` 缓存；失败写 8000 占位 JSON |
 | I3 | unique `(pcm, wake, lang)` 一次 ASR/NLL |
 | I4–I5 | 冻结 `reason_code` 与 `decision_trace` |
 | I6 | `review_flat/`：`0000__SELECTED` 在组内第一条 |

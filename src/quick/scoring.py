@@ -25,6 +25,7 @@ _IDENTITY_FIELDS = frozenset({
 _BIND_FIELDS = ("pcm_sha256", "wake_text", "lang")
 _FEATURE_COMPARE = (
     "hyp", "text", "transcript", "nll", "q_kw", "token_count", "score_kind",
+    "qkw_calibrator_hash", "calibrator_hash",
     "embedding", "vector", "speaker_ref_score", "cos_to_ref",
     "p_music", "p_overlap", "dnsmos_sig", "dnsmos_bak", "dnsmos_ovrl",
     "pcm_sha256", "audio_sha256", "wake_text", "lang",
@@ -185,6 +186,7 @@ def score_rows(
     aliases: dict[str, list[str]] | None = None,
     allow_missing_asr: bool = False,
     qkw_calibrated: bool = False,
+    qkw_calibrator_hash: str | None = None,
     feature_dir: str | Path | None = None,
     policy: Any = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -193,12 +195,18 @@ def score_rows(
     qkw = load_sidecar(qkw_sidecar)
     embeds = load_sidecar(embedding_sidecar)
     noise = load_sidecar(noise_sidecar)
+    if qkw_calibrated and not qkw_calibrator_hash:
+        raise ValueError("calibrated q_kw requires qkw_calibrator_hash")
+    if qkw_calibrated and not qkw:
+        raise RuntimeError("calibrated q_kw requires a non-empty q_kw sidecar")
 
     audio_features: dict[str, dict[str, Any]] = {}
     asr_features: dict[str, dict[str, Any]] = {}
     cache_hit = 0
     cache_miss = 0
     missing_asr: list[str] = []
+    qkw_errors: list[str] = []
+    qkw_valid = 0
 
     for source in rows:
         pcm = source.get("canonical_id") or source.get("pcm_sha256")
@@ -242,14 +250,32 @@ def score_rows(
         qvalue = finite(q.get("q_kw"))
         align_value = finite(q.get("ctc_align_score", q.get("align_score")))
         nvalue = finite(n.get("nll", a.get("nll")))
-        calibrated = bool(qvalue is not None and (qkw_calibrated or q.get("score_kind") == "calibrated_qkw"))
+        calibrated = False
+        if qkw_calibrated:
+            row_hash = q.get("qkw_calibrator_hash") or q.get("calibrator_hash")
+            reason = None
+            if not q:
+                reason = "missing"
+            elif q.get("score_kind") != "calibrated_qkw":
+                reason = f"score_kind={q.get('score_kind')!r}"
+            elif row_hash != qkw_calibrator_hash:
+                reason = f"calibrator_hash={row_hash!r}"
+            elif qvalue is None or not 0.0 <= qvalue <= 1.0:
+                reason = f"q_kw={q.get('q_kw')!r}"
+            if reason is None:
+                calibrated = True
+                qkw_valid += 1
+            else:
+                qkw_errors.append(f"{sk}:{reason}")
         asr_features[sk] = {
             **text,
             "nll": nvalue,
-            "q_kw": qvalue,
+            # An unsigned/self-declared probability must never enter routing.
+            "q_kw": qvalue if calibrated else None,
             "keyword_score": align_value,
             "keyword_score_kind": q.get("score_kind", "ctc_align") if align_value is not None else None,
             "qkw_calibrated": calibrated,
+            "qkw_calibrator_hash": qkw_calibrator_hash if calibrated else None,
             "score_kind": "calibrated_qkw" if calibrated else "nll",
             "token_count": n.get("token_count", a.get("token_count")),
             "missing": False,
@@ -257,6 +283,11 @@ def score_rows(
 
     if missing_asr and not allow_missing_asr:
         raise RuntimeError(f"ASR sidecar missing {len(missing_asr)} candidate references; first={missing_asr[:5]}")
+    if qkw_errors:
+        raise RuntimeError(
+            "calibrated q_kw contract failed for "
+            f"{len(qkw_errors)}/{len(asr_features)} unique score keys; first={qkw_errors[:5]}"
+        )
 
     scored: list[dict[str, Any]] = []
     for source in rows:
@@ -318,6 +349,10 @@ def score_rows(
         "feature_cache_hit": cache_hit,
         "feature_cache_miss": cache_miss,
         "qkw_calibrated": qkw_calibrated,
+        "qkw_calibrator_hash": qkw_calibrator_hash if qkw_calibrated else None,
+        "qkw_expected": len(asr_features) if qkw_calibrated else 0,
+        "qkw_valid": qkw_valid if qkw_calibrated else 0,
+        "qkw_coverage": (qkw_valid / len(asr_features)) if qkw_calibrated and asr_features else None,
         "n_candidate_refs": len(scored),
         "n_unique_raw_pcm": len({r["canonical_id"] for r in scored if r.get("view") == "raw" and r.get("canonical_id")}),
         "n_unique_se_pcm": len({r["canonical_id"] for r in scored if r.get("view") == "moss48k" and r.get("canonical_id")}),

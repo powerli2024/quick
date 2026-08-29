@@ -113,13 +113,18 @@ def freeze_signatures(
     return payload
 
 
-def assert_work_dir_signature(work_dir: str | Path, signatures: dict[str, Any]) -> None:
-    path = Path(work_dir) / "signatures.json"
+def assert_work_dir_signature(
+    work_dir: str | Path,
+    signatures: dict[str, Any],
+    *,
+    filename: str = "signatures.json",
+) -> None:
+    path = Path(work_dir) / filename
     if not path.is_file():
         return
     old = read_json(path)
     if old.get("signature_hash") != signatures.get("signature_hash"):
         raise RuntimeError(
-            "work-dir signatures.json does not match this run; choose a new --work-dir "
+            f"work-dir {filename} does not match this run; choose a new --work-dir "
             "so ASR/SE/embedding/noise results are not mixed"
         )

@@ -25,6 +25,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--s7-arm", required=True)
     p.add_argument("--expected-uids", type=int, default=0, help="combined pos+neg UID count; 0 disables")
     p.add_argument("--work-dir", type=Path, required=True)
+    p.add_argument(
+        "--audio-cache-root", type=Path, default=None,
+        help="fixed reusable root for sep_pcm/ and signature-bound se48k/ audio",
+    )
     p.add_argument("--asr-jsonl", type=Path, default=None)
     p.add_argument("--asr-command", default=None, help="template containing {manifest} and {output}")
     p.add_argument("--asr-model-dir", type=Path, default=None, help="AutoDL Qwen3-ASR dir; hashed into signatures")
@@ -65,6 +69,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--mossformer-model-hash", default=None)
     p.add_argument("--speaker-encoder-hash", default=None)
     p.add_argument("--qkw-calibrator-hash", default=None)
+    p.add_argument("--qkw-calibrator-json", type=Path, default=None, help="frozen calibrator artifact; hash is verified")
     p.add_argument("--inference-signature", default=None)
     return p.parse_args()
 

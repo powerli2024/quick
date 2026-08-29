@@ -9,11 +9,13 @@ from pathlib import Path
 from typing import Any
 
 from .accept import i8_validate, local_evaluate
+from .cache import default_audio_cache_root, materialize_sep_audio
 from .cer import alias_table_hash, load_alias_table
 from .export import export_flat
 from .inventory import build_inventory
 from .io import read_json, write_json, write_jsonl
 from .policy import DEFAULT_POLICY_JSON, build_route_policy, load_policy_file
+from .qkw import load_calibrator
 from .scoring import score_key, score_rows
 from .se import add_se_views
 from .signatures import assert_work_dir_signature, file_sha256, freeze_signatures, hash_model_dir
@@ -26,6 +28,7 @@ class RunConfig:
     s1_arm: str
     s7_arm: str
     work_dir: Path
+    audio_cache_root: Path | None = None
     expected_uids: int = 0
     asr_jsonl: Path | None = None
     asr_command: str | None = None
@@ -67,6 +70,7 @@ class RunConfig:
     mossformer_model_hash: str | None = None
     speaker_encoder_hash: str | None = None
     qkw_calibrator_hash: str | None = None
+    qkw_calibrator_json: Path | None = None
     inference_signature: str | None = None
     noise_model_hashes: Any = None
 
@@ -108,14 +112,17 @@ def _run_sidecar_command(template: str, *, manifest: Path, output: Path, selecte
 
 def _write_asr_manifest(work: Path, rows: list[dict[str, Any]]) -> Path:
     path = work / "asr_manifest.jsonl"
-    write_jsonl(path, [
-        {
+    unique: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        if not r.get("source_wav"):
+            continue
+        key = r.get("score_key") or score_key(r)
+        unique.setdefault(str(key), {
             "candidate_id": r["candidate_id"], "input": r.get("source_wav"),
             "pcm_sha256": r.get("pcm_sha256"), "wake_text": r["wake_text"], "lang": r["lang"],
-            "score_key": r.get("score_key") or score_key(r),
-        }
-        for r in rows if r.get("source_wav")
-    ])
+            "score_key": key,
+        })
+    write_jsonl(path, unique.values())
     return path
 
 
@@ -147,10 +154,24 @@ def _selected_index_hash(path: Path | None) -> str | None:
 def run(cfg: RunConfig) -> dict[str, Any]:
     work = Path(cfg.work_dir).resolve()
     work.mkdir(parents=True, exist_ok=True)
+    audio_cache_root = Path(cfg.audio_cache_root).resolve() if cfg.audio_cache_root else default_audio_cache_root(work)
+    audio_cache_root.mkdir(parents=True, exist_ok=True)
     if cfg.se_backend == "command" and not cfg.se_command and not cfg.se_batch_command:
         raise ValueError("command SE requires se_command or se_batch_command")
+    if cfg.qkw_calibrated and cfg.qkw_calibrator_json is None:
+        raise ValueError(
+            "--qkw-calibrated requires --qkw-calibrator-json; a bare --qkw-calibrator-hash is not reproducible"
+        )
+    if cfg.qkw_calibrator_json is not None:
+        _, actual_calibrator_hash = load_calibrator(cfg.qkw_calibrator_json)
+        if cfg.qkw_calibrator_hash and cfg.qkw_calibrator_hash != actual_calibrator_hash:
+            raise ValueError(
+                "--qkw-calibrator-hash does not match --qkw-calibrator-json: "
+                f"declared={cfg.qkw_calibrator_hash} actual={actual_calibrator_hash}"
+            )
+        cfg.qkw_calibrator_hash = actual_calibrator_hash
     if cfg.qkw_calibrated and not cfg.qkw_calibrator_hash:
-        raise ValueError("--qkw-calibrated requires --qkw-calibrator-hash")
+        raise ValueError("--qkw-calibrated requires a verified qkw-calibrator-hash")
 
     aliases = load_alias_table(cfg.alias_json)
     policy_path = Path(cfg.policy_json) if cfg.policy_json else (DEFAULT_POLICY_JSON if DEFAULT_POLICY_JSON.is_file() else None)
@@ -172,7 +193,7 @@ def run(cfg: RunConfig) -> dict[str, Any]:
 
     asr_model_hash = cfg.asr_model_hash or hash_model_dir(cfg.asr_model_dir)
     # First freeze without post-command sidecar hashes; refreshed after scoring inputs exist.
-    signatures = freeze_signatures(
+    input_signatures = freeze_signatures(
         s1_arm=cfg.s1_arm, s7_arm=cfg.s7_arm,
         extract_sep_run_id=cfg.extract_sep_run_id,
         asr_model_hash=asr_model_hash,
@@ -197,12 +218,17 @@ def run(cfg: RunConfig) -> dict[str, Any]:
         policy_json=policy_path,
         se_backend=cfg.se_backend, se_command=cfg.se_command, se_batch_command=cfg.se_batch_command,
     )
-    assert_work_dir_signature(work, signatures)
-    write_json(work / "signatures.json", signatures)
+    assert_work_dir_signature(work, input_signatures, filename="input_signatures.json")
+    write_json(work / "input_signatures.json", input_signatures)
 
     refs, registry, inventory_meta = build_inventory(
         cfg.pos_neg, s1_arm=cfg.s1_arm, s7_arm=cfg.s7_arm, expected_uids=expected_uids,
     )
+    sep_cache_meta = materialize_sep_audio(
+        refs, registry, cache_root=audio_cache_root,
+        run_manifest=work / "sep_audio_cache_manifest.jsonl",
+    )
+    inventory_meta["audio_cache"] = sep_cache_meta
     write_json(work / "inventory_meta.json", {k: v for k, v in inventory_meta.items() if k != "availability"} | {
         "n_s7_unavailable": inventory_meta.get("n_s7_unavailable"),
     })
@@ -210,7 +236,8 @@ def run(cfg: RunConfig) -> dict[str, Any]:
     write_jsonl(work / "raw_candidate_refs.jsonl", refs)
 
     all_rows, se_meta = add_se_views(
-        refs, registry, work_dir=work, backend=cfg.se_backend, command=cfg.se_command,
+        refs, registry, work_dir=work, cache_root=audio_cache_root,
+        backend=cfg.se_backend, command=cfg.se_command,
         batch_command=cfg.se_batch_command, precomputed_dir=cfg.precomputed_se_dir,
         resume=cfg.resume, mossformer_model_hash=cfg.mossformer_model_hash,
         inference_signature=cfg.inference_signature,
@@ -266,6 +293,7 @@ def run(cfg: RunConfig) -> dict[str, Any]:
         qkw_sidecar=qkw_path, embedding_sidecar=embed_path,
         noise_sidecar=cfg.noise_jsonl, aliases=aliases,
         allow_missing_asr=cfg.allow_missing_asr, qkw_calibrated=cfg.qkw_calibrated,
+        qkw_calibrator_hash=cfg.qkw_calibrator_hash,
         feature_dir=work, policy=policy,
     )
     write_jsonl(work / "scored_candidates.jsonl", scored)
@@ -354,6 +382,9 @@ def run(cfg: RunConfig) -> dict[str, Any]:
         "policy_hash": signatures.get("route_policy_hash"),
         "paths": {
             "work_dir": str(work),
+            "audio_cache_root": str(audio_cache_root),
+            "sep_audio_cache": sep_cache_meta.get("root"),
+            "se_audio_cache": se_meta.get("cache_root"),
             "flat_dir": str(Path(flat_dir).resolve()),
             "selected_only_dir": str(Path(cfg.selected_only_dir).resolve()) if cfg.selected_only_dir else None,
             "policy_json": str(Path(policy_path).resolve()) if policy_path else None,
@@ -370,6 +401,10 @@ def run(cfg: RunConfig) -> dict[str, Any]:
         f"- paired worsened: `{local['n_paired_worsened']}`",
         f"- s7 trigger/switch: `{local['n_triggered_s7']}/{local['n_switched_s7']}`",
         f"- se backend: `{cfg.se_backend}`",
+        f"- audio cache: `{audio_cache_root}`",
+        f"- sep cache hit/miss: `{sep_cache_meta.get('n_cache_hit')}/{sep_cache_meta.get('n_cache_miss')}`",
+        f"- SE cache hit/miss: `{se_meta.get('n_cache_hit')}/{se_meta.get('n_cache_miss')}`",
+        f"- q_kw signed coverage: `{score_meta.get('qkw_valid')}/{score_meta.get('qkw_expected')}`",
         f"- flat review: `{flat_dir}`", "",
         "Spectral SE is audit-only. I8 PASS requires production SE + provenance-bound CMD/Presence/contest JSON.",
     ]
@@ -380,7 +415,8 @@ def run(cfg: RunConfig) -> dict[str, Any]:
 def run_from_args(args: Any) -> dict[str, Any]:
     cfg = RunConfig(
         pos_neg=Path(args.pos_neg), s1_arm=args.s1_arm, s7_arm=args.s7_arm,
-        work_dir=Path(args.work_dir), expected_uids=args.expected_uids,
+        work_dir=Path(args.work_dir), audio_cache_root=getattr(args, "audio_cache_root", None),
+        expected_uids=args.expected_uids,
         asr_jsonl=args.asr_jsonl, asr_command=args.asr_command,
         asr_model_dir=getattr(args, "asr_model_dir", None),
         nll_jsonl=args.nll_jsonl, nll_command=getattr(args, "nll_command", None),
@@ -410,6 +446,7 @@ def run_from_args(args: Any) -> dict[str, Any]:
         mossformer_model_hash=getattr(args, "mossformer_model_hash", None),
         speaker_encoder_hash=getattr(args, "speaker_encoder_hash", None),
         qkw_calibrator_hash=getattr(args, "qkw_calibrator_hash", None),
+        qkw_calibrator_json=getattr(args, "qkw_calibrator_json", None),
         inference_signature=getattr(args, "inference_signature", None),
     )
     return run(cfg)

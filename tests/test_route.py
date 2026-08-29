@@ -74,6 +74,17 @@ def test_equal_cer_nll_gain_switches():
     assert result["reason_code"] == "SWITCH_S7_EQUAL_CER_NLL_GAIN"
 
 
+def test_calibrated_qkw_blocks_uncalibrated_ctc_fallback():
+    s1 = _row(cer_route=0.2, q_kw=0.80, qkw_calibrated=True, keyword_score=0.1, pcm_sha256="q1")
+    s7 = _row(
+        candidate_id="C-pos-u-s7-raw-original", role="s7", cer_route=0.2,
+        q_kw=0.805, qkw_calibrated=True, keyword_score=1.0, pcm_sha256="q2",
+    )
+    result = route_uid([s1, s7], RoutePolicy(qkw_switch_margin=0.01))
+    assert result["reason_code"] == "KEEP_S1_TIE_NO_GAIN"
+    assert result["selected"]["role"] == "s1"
+
+
 def test_raw_preferred_on_stage_tie():
     raw = _row(cer_route=0.0, view="raw")
     moss = _row(candidate_id="C-pos-u-s1-moss48k-original", view="moss48k", cer_route=0.0, pcm_sha256="zzz")

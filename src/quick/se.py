@@ -79,6 +79,7 @@ def add_se_views(
     registry: dict[str, InventoryCanonical],
     *,
     work_dir: str | Path,
+    cache_root: str | Path | None = None,
     backend: str,
     command: str | None = None,
     batch_command: str | None = None,
@@ -92,22 +93,29 @@ def add_se_views(
         raise ValueError(f"unsupported SE backend {backend!r}")
     if backend == "none":
         return list(refs), {"backend": backend, "n_unique_raw": len(registry), "n_views": 0, "status": "audit_only", "n_se_failures": 0}
-    root = Path(work_dir) / "se_wav"
-    root.mkdir(parents=True, exist_ok=True)
-    signature = {
+    transform_signature = {
         "backend": backend,
         "command": command,
         "batch_command": batch_command,
         "precomputed_dir": str(Path(precomputed_dir).resolve()) if precomputed_dir else None,
         "mossformer_model_hash": mossformer_model_hash,
         "inference_signature": inference_signature or backend,
+        "output_contract": "full_waveform_wav/v1",
+    }
+    transform_hash = json_hash(transform_signature)
+    base = Path(cache_root).resolve() if cache_root is not None else Path(work_dir).resolve()
+    root = base / "se48k" / transform_hash
+    root.mkdir(parents=True, exist_ok=True)
+    signature = {
+        "transform": transform_signature,
+        "transform_hash": transform_hash,
         "raw_pcm": sorted(registry),
     }
-    meta_path = Path(work_dir) / "se_wav.meta.json"
+    meta_path = Path(work_dir) / "se_cache_binding.json"
     if meta_path.is_file():
         old = read_json(meta_path)
         if old.get("signature_hash") and old["signature_hash"] != json_hash(signature):
-            raise RuntimeError("SE cache signature mismatch; use a new --work-dir so backends are not mixed")
+            raise RuntimeError("SE binding signature mismatch; use a new --work-dir so datasets are not mixed")
     write_json(meta_path, {"status": "running", "signature": signature, "signature_hash": json_hash(signature)})
 
     raw_ok = [(h, c) for h, c in sorted(registry.items()) if not str(h).startswith("undecodable:")]
@@ -115,6 +123,8 @@ def add_se_views(
     output_by_raw: dict[str, Path] = {}
     failures: dict[str, str] = {}
     precomputed_index: dict[str, Path] = {}
+    cache_hits = 0
+    cache_misses = 0
     if backend == "precomputed" and precomputed_dir is not None:
         pre_root = Path(precomputed_dir)
         if pre_root.is_dir():
@@ -130,7 +140,9 @@ def add_se_views(
         dest = root / raw_hash[:2] / f"{raw_hash}.wav"
         output_by_raw[raw_hash] = dest
         if dest.is_file() and resume:
+            cache_hits += 1
             continue
+        cache_misses += 1
         try:
             if backend == "spectral":
                 wav, sr = _load_raw(can)
@@ -273,6 +285,11 @@ def add_se_views(
         "failures": failures,
         "manifest": str(Path(work_dir) / "se_manifest.jsonl") if jobs else None,
         "signature_hash": json_hash(signature),
+        "transform_hash": transform_hash,
+        "cache_root": str(root),
+        "n_cache_hit": cache_hits,
+        "n_cache_miss": cache_misses,
+        "n_fresh": cache_misses,
         "mossformer_model_hash": mossformer_model_hash,
         "inference_signature": inference_signature or backend,
     }
