@@ -431,11 +431,25 @@ python scripts/score_qwen_dual_manifest.py \
 在完整 s1/s7 路由中，Q0 可直接这样启用（`run_a3_route.sh` 已支持）：
 
 ```bash
+cd /root/quick
 ASR_BACKEND=qwen \
+QUICK_DIR=/root/quick \
+POS_NEG=/root/autodl-tmp/kws_sep_fullaudio_v1 \
+WORK_DIR=/root/autodl-tmp/quick_a3_qwen_v1 \
+AUDIO_CACHE_ROOT=/root/autodl-tmp/quick_audio_cache_a3_v1 \
+PRECOMPUTED_SE_DIR=/root/autodl-tmp/quick_audio_cache_a3_v1/se48k \
 QWEN_ASR_DIR=/root/autodl-tmp/Qwen3-ASR-1.7B \
 ASR_CACHE_DIR=/root/autodl-tmp/quick_asr_cache \
-bash scripts/run_a3_route.sh
+EXPECTED_UIDS=1838 \
+QWEN_BATCH_SIZE=1 \
+DURATION_BUCKET_SEC=0.5 \
+bash /root/quick/scripts/run_a3_route.sh
 ```
+
+这里 `POS_NEG` 只负责读取 s1/s7 索引和确认 UID；raw 音频优先复用
+`AUDIO_CACHE_ROOT/sep_pcm`，MossFormer 音频从精确的
+`AUDIO_CACHE_ROOT/se48k` 目录递归按 PCM 哈希复用。不能把包含 `sep_pcm`
+和 `se48k` 的缓存根目录整体填给 `PRECOMPUTED_SE_DIR`。
 
 双 sidecar 完成后可只做审计、不重新推理：
 

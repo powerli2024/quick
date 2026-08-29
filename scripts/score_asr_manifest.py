@@ -93,7 +93,16 @@ def score_manifest(
 ) -> dict[str, Any]:
     kws_src = _ensure_kws()
     from kws.asr_transcribe import Qwen3ASRTranscriber
-    from kws.audio import load_wav_mono, resampler_name
+    # ``resampler_name`` was added to newer kws builds.  Keep the sidecar
+    # runnable against an older /root/kws checkout: the actual samples still
+    # go through the same ``load_wav_mono`` implementation, while the cache
+    # provenance records a conservative compatibility label.
+    from kws.audio import load_wav_mono
+    try:
+        from kws.audio import resampler_name as _kws_resampler_name
+    except ImportError:
+        def _kws_resampler_name() -> str:
+            return "kws_audio_legacy"
 
     mode = str(context_mode).strip().lower()
     if mode not in {"none", "wake"}:
@@ -120,7 +129,7 @@ def score_manifest(
     model_hash = _model_hash(model_dir)
     if duration_bucket_sec <= 0:
         raise ValueError("duration_bucket_sec must be positive")
-    runtime_probe = {"adapter": "kws.Qwen3ASRTranscriber", "device": device, "dtype": dtype, "sample_rate": 16000, "resampler": resampler_name(), "mode": mode, "duration_bucket_sec": float(duration_bucket_sec), "qwen_asr_version": _package_version("qwen_asr"), "transformers_version": _package_version("transformers")}
+    runtime_probe = {"adapter": "kws.Qwen3ASRTranscriber", "device": device, "dtype": dtype, "sample_rate": 16000, "resampler": _kws_resampler_name(), "mode": mode, "duration_bucket_sec": float(duration_bucket_sec), "qwen_asr_version": _package_version("qwen_asr"), "transformers_version": _package_version("transformers")}
     runtime_hash = _hash_payload(runtime_probe)
     cache_path = _cache_path(cache_dir, mode, model_hash, runtime_hash) if cache_dir else None
     cache = _load_cache(cache_path) if cache_path else {}
@@ -150,7 +159,7 @@ def score_manifest(
             wavs = [item[3] for item in chunk]
             details = asr.transcribe_many_detailed(wavs, language=lang, wake_text=context_text, context_mode=mode)
             for (asr_key, row, _, _wav), detail in zip(chunk, details):
-                cache[asr_key] = {"asr_key": asr_key, "hyp": str(detail.get("hyp") or ""), "model_hash": model_hash, "runtime_hash": runtime_hash, "context_mode": mode, "context_text": context_text, "context_hash": _hash_payload(context_text), "wake_text": row.get("wake_text"), "lang": lang, "pcm_sha256": row.get("pcm_sha256"), "input": row.get("input"), "sample_rate": 16000, "num_samples": detail.get("num_samples"), "duration_sec": detail.get("duration_sec"), "resampler": resampler_name()}
+                cache[asr_key] = {"asr_key": asr_key, "hyp": str(detail.get("hyp") or ""), "model_hash": model_hash, "runtime_hash": runtime_hash, "context_mode": mode, "context_text": context_text, "context_hash": _hash_payload(context_text), "wake_text": row.get("wake_text"), "lang": lang, "pcm_sha256": row.get("pcm_sha256"), "input": row.get("input"), "sample_rate": 16000, "num_samples": detail.get("num_samples"), "duration_sec": detail.get("duration_sec"), "resampler": _kws_resampler_name()}
             done += len(chunk)
             print(f"\r[ASR:{mode}] {done}/{len(pending)} cache={cached} backend=qwen3", end="", flush=True)
     if pending:
@@ -168,7 +177,7 @@ def score_manifest(
         result = cache.get(asr_key)
         if result is None:
             raise RuntimeError(f"internal ASR cache miss after inference: {asr_key}")
-        out_rows.append({"candidate_id": row.get("candidate_id"), "pcm_sha256": row.get("pcm_sha256"), "wake_text": row.get("wake_text"), "lang": row.get("lang"), "hyp": result.get("hyp", ""), "score_key": row.get("score_key"), "path": row.get("input"), "asr_key": asr_key, "context_mode": mode, "context_hash": result.get("context_hash", _hash_payload(context_text)), "model_hash": model_hash, "runtime_hash": runtime_hash, "sample_rate": result.get("sample_rate", 16000), "duration_sec": result.get("duration_sec"), "resampler": result.get("resampler", resampler_name())})
+        out_rows.append({"candidate_id": row.get("candidate_id"), "pcm_sha256": row.get("pcm_sha256"), "wake_text": row.get("wake_text"), "lang": row.get("lang"), "hyp": result.get("hyp", ""), "score_key": row.get("score_key"), "path": row.get("input"), "asr_key": asr_key, "context_mode": mode, "context_hash": result.get("context_hash", _hash_payload(context_text)), "model_hash": model_hash, "runtime_hash": runtime_hash, "sample_rate": result.get("sample_rate", 16000), "duration_sec": result.get("duration_sec"), "resampler": result.get("resampler", _kws_resampler_name())})
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8", newline="\n") as handle:
         for row in out_rows:

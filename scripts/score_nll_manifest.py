@@ -33,7 +33,12 @@ def main() -> int:
     p.add_argument("--batch-size", type=int, default=1)
     args = p.parse_args()
     _ensure_kws()
-    from kws.audio import load_wav_mono, resampler_name
+    from kws.audio import load_wav_mono
+    try:
+        from kws.audio import resampler_name as _kws_resampler_name
+    except ImportError:
+        def _kws_resampler_name() -> str:
+            return "kws_audio_legacy"
     from kws.qkw_nll import Qwen3ASRNLLScorer
 
     model_dir = args.model_dir or os.environ.get("ASR_MODEL_DIR")
@@ -71,7 +76,7 @@ def main() -> int:
             handle.write(json.dumps({
                 "candidate_id": row.get("candidate_id"), "pcm_sha256": row.get("pcm_sha256"),
                 "nll": nll, "token_count": tokens, "score_kind": "nll",
-                "sample_rate": 16000, "resampler": resampler_name(),
+                "sample_rate": 16000, "resampler": _kws_resampler_name(),
             }, ensure_ascii=False) + "\n")
     return 0
 
