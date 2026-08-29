@@ -30,10 +30,10 @@ def main() -> int:
     p.add_argument("--model-dir", type=Path, default=None)
     p.add_argument("--device", default=os.environ.get("DEVICE", "cuda:0"))
     p.add_argument("--dtype", default="bfloat16")
-    p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument("--batch-size", type=int, default=1)
     args = p.parse_args()
     _ensure_kws()
-    from kws.audio import load_wav_mono
+    from kws.audio import load_wav_mono, resampler_name
     from kws.qkw_nll import Qwen3ASRNLLScorer
 
     model_dir = args.model_dir or os.environ.get("ASR_MODEL_DIR")
@@ -71,6 +71,7 @@ def main() -> int:
             handle.write(json.dumps({
                 "candidate_id": row.get("candidate_id"), "pcm_sha256": row.get("pcm_sha256"),
                 "nll": nll, "token_count": tokens, "score_kind": "nll",
+                "sample_rate": 16000, "resampler": resampler_name(),
             }, ensure_ascii=False) + "\n")
     return 0
 

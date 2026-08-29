@@ -18,7 +18,7 @@ from quick.signatures import file_sha256  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="fit independent dev-set q_kw calibration")
-    parser.add_argument("--input", type=Path, required=True)
+    parser.add_argument("--input", "--labeled-jsonl", dest="input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--score-field", default="ctc_align_score")
     parser.add_argument("--label-field", default="label")

@@ -1,0 +1,19 @@
+{
+  "schema": "quick_crop_policy/v1",
+  "pads_sec": {
+    "keyword_tight": [0.08, 0.12],
+    "keyword_normal": [0.16, 0.24],
+    "keyword_wide": [0.30, 0.40],
+    "speaker_ctx": [0.50, 0.60]
+  },
+  "min_duration_sec": 0.12,
+  "max_duration_sec": null,
+  "fade_ms": 0,
+  "require_full_token_coverage": true,
+  "allow_multiple_occurrences": false,
+  "notes": [
+    "full 音频永久保留；裁剪失败必须回退 full",
+    "max_duration_sec=null，不能用固定 3 秒截断长音频",
+    "speaker_ctx 仅为候选，不代表已证明是同一说话人"
+  ]
+}

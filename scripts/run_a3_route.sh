@@ -12,6 +12,10 @@ S7_ARM="${S7_ARM:-s7_cv_then_onnx_gate/thr_a}"
 EXPECTED_UIDS="${EXPECTED_UIDS:-0}"
 DEVICE="${DEVICE:-cuda:0}"
 ASR_BACKEND="${ASR_BACKEND:-sensevoice}"
+QWEN_ASR_DIR="${QWEN_ASR_DIR:-/root/autodl-tmp/Qwen3-ASR-1.7B}"
+ASR_CACHE_DIR="${ASR_CACHE_DIR:-/root/autodl-tmp/quick_asr_cache}"
+QWEN_BATCH_SIZE="${QWEN_BATCH_SIZE:-1}"
+DURATION_BUCKET_SEC="${DURATION_BUCKET_SEC:-0.5}"
 SENSEVOICE_DIR="${SENSEVOICE_DIR:-/root/autodl-tmp/quick_models/a3/SenseVoiceSmall}"
 PARAFORMER_ZH_DIR="${PARAFORMER_ZH_DIR:-/root/autodl-tmp/quick_models/a3/Paraformer-zh}"
 PARAFORMER_EN_DIR="${PARAFORMER_EN_DIR:-/root/autodl-tmp/quick_models/a3/Paraformer-en}"
@@ -29,8 +33,13 @@ elif [[ "$ASR_BACKEND" == "paraformer" ]]; then
     echo "run scripts/download_a3_models.sh or set PARAFORMER_ZH_DIR/PARAFORMER_EN_DIR" >&2
     exit 2
   fi
+elif [[ "$ASR_BACKEND" == "qwen" ]]; then
+  if [[ ! -d "$QWEN_ASR_DIR" ]]; then
+    echo "missing Qwen3-ASR model dir: $QWEN_ASR_DIR" >&2
+    exit 2
+  fi
 else
-  echo "unsupported ASR_BACKEND=$ASR_BACKEND (choose sensevoice or paraformer)" >&2
+  echo "unsupported ASR_BACKEND=$ASR_BACKEND (choose sensevoice, paraformer or qwen)" >&2
   exit 2
 fi
 
@@ -39,6 +48,8 @@ if [[ -z "${ASR_COMMAND:-}" || "$ASR_COMMAND" != *"{manifest}"* || "$ASR_COMMAND
   # parameter-expansion syntax and turns {manifest} into {manifest.
   if [[ "$ASR_BACKEND" == "paraformer" ]]; then
     ASR_COMMAND="python ${QUICK_DIR}/scripts/score_paraformer_manifest.py --manifest {manifest} --output {output} --zh-model-dir ${PARAFORMER_ZH_DIR} --en-model-dir ${PARAFORMER_EN_DIR} --device ${DEVICE}"
+  elif [[ "$ASR_BACKEND" == "qwen" ]]; then
+    ASR_COMMAND="python ${QUICK_DIR}/scripts/score_asr_manifest.py --manifest {manifest} --output {output} --model-dir ${QWEN_ASR_DIR} --device ${DEVICE} --batch-size ${QWEN_BATCH_SIZE} --context-mode none --cache-dir ${ASR_CACHE_DIR} --duration-bucket-sec ${DURATION_BUCKET_SEC}"
   else
     ASR_COMMAND="python ${QUICK_DIR}/scripts/score_sensevoice_manifest.py --manifest {manifest} --output {output} --model-dir ${SENSEVOICE_DIR} --device ${DEVICE}"
   fi
@@ -60,7 +71,11 @@ PY
 )"
   fi
 else
-  ASR_MODEL_DIR="$SENSEVOICE_DIR"
+  if [[ "$ASR_BACKEND" == "qwen" ]]; then
+    ASR_MODEL_DIR="$QWEN_ASR_DIR"
+  else
+    ASR_MODEL_DIR="$SENSEVOICE_DIR"
+  fi
 fi
 
 args=(

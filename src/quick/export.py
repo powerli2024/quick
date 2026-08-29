@@ -102,6 +102,66 @@ def _find_se_companion(selected: dict[str, Any], group_rows: list[dict[str, Any]
     ))
 
 
+def _fmt(value: Any, digits: int = 4) -> str:
+    number = finite(value)
+    if number is not None:
+        return f"{number:.{digits}f}"
+    text = str(value or "")
+    return text if text else "-"
+
+
+def _render_reason_txt(item: dict[str, Any], group_rows: list[dict[str, Any]], result: dict[str, Any], selected: dict[str, Any], companion: dict[str, Any] | None) -> str:
+    """Human-readable route explanation; machine JSON remains in review_flat."""
+    s1_winner = result.get("s1_winner") or {}
+    s7_winner = result.get("s7_winner") or {}
+    def winner_line(label: str, row: dict[str, Any]) -> str:
+        if not row:
+            return f"{label}: 无可排名候选"
+        return (
+            f"{label}: {row.get('role')}/{row.get('stream')}/"
+            f"{('SE' if row.get('view') != 'raw' else 'raw')} "
+            f"CER={_fmt(row.get('cer_route'))} ASR=\"{str(row.get('hyp') or '').strip() or '-'}\""
+        )
+    lines = [
+        f"UID: {item['uid']}    split: {item['split']}    wake_text: {item.get('wake_text') or '-'}    lang: {item.get('lang') or '-'}",
+        "选路流程: 每个 s1/s7 流先比较 raw 与 MossFormer SE；CER 为硬主指标；CER 接近时比较 q_kw/NLL/声纹，再比较噪声与 SNR；最后才用确定性排序。",
+        "候选命名: role=s1/s7；stream=original 或 spk1、spk2...；view=raw 或 SE。",
+        winner_line("s1 阶段 winner", s1_winner),
+        winner_line("s7 阶段 winner", s7_winner),
+        f"触发 s7: {'是' if result.get('triggered_s7') else '否'}    切换 s7: {'是' if result.get('switched_s7') else '否'}    原因: {result.get('reason_code') or '-'} - {result.get('reason_text') or '-'}",
+        "",
+        "最终选择",
+        f"  role={selected.get('role')}  stream={selected.get('stream')}  view={'SE' if selected.get('view') != 'raw' else 'raw'}  candidate={selected.get('candidate_id')}",
+        f"  CER={_fmt(selected.get('cer_route'))}  ASR={str(selected.get('hyp') or '').strip() or '-'}",
+        f"  q_kw={_fmt(selected.get('q_kw'))}  NLL={_fmt(selected.get('nll'))}  keyword_score={_fmt(selected.get('keyword_score'))}",
+        f"  p_music={_fmt((selected.get('audio_quality') or {}).get('p_music'))}  p_overlap={_fmt((selected.get('audio_quality') or {}).get('p_overlap'))}  SNR(dB)={_fmt((selected.get('audio_quality') or {}).get('snr_vad_db'))}  DNSMOS={_fmt((selected.get('audio_quality') or {}).get('dnsmos_ovrl'))}",
+        f"  SE伴随文件: {companion.get('source_wav') if companion else '缺失'}",
+        "",
+        "各候选评价（按 role→stream→raw/SE 排列）",
+    ]
+    ordered = sorted(group_rows, key=lambda row: (
+        0 if row.get('role') == 's1' else 1,
+        str(row.get('stream') or ''),
+        0 if row.get('view') == 'raw' else 1,
+        str(row.get('candidate_id') or ''),
+    ))
+    for row in ordered:
+        mark = "[最终选择]" if row.get('candidate_id') == selected.get('candidate_id') else "[候选]"
+        quality = row.get('audio_quality') or {}
+        hyp = " ".join(str(row.get('hyp') or '').split()) or "-"
+        lines.append(
+            f"  {mark} {row.get('role')}/{row.get('stream')}/{('SE' if row.get('view') != 'raw' else 'raw')} "
+            f"validity={row.get('validity') or '-'} CER={_fmt(row.get('cer_route'))} "
+            f"ASR=\"{hyp}\" coverage={_fmt(row.get('wake_coverage'))} core={row.get('core_hit') if row.get('core_hit') is not None else '-'} extra={_fmt(row.get('extra_ratio'))} "
+            f"q_kw={_fmt(row.get('q_kw'))} NLL={_fmt(row.get('nll'))} keyword={_fmt(row.get('keyword_score'))} "
+            f"p_music={_fmt(quality.get('p_music'))} p_overlap={_fmt(quality.get('p_overlap'))} "
+            f"clip={_fmt(quality.get('clip_rate'))} speech={_fmt(quality.get('speech_ratio'))} SNR(dB)={_fmt(quality.get('snr_vad_db'))} "
+            f"DNSMOS={_fmt(quality.get('dnsmos_ovrl'))} cos_SE_raw={_fmt(row.get('cos_se_raw'))} speaker_ref={_fmt(row.get('speaker_ref_score'))}"
+        )
+    lines.extend(["", "说明: CER 越低越好；p_music/p_overlap/clip 越低越好；SNR 与 DNSMOS 越高越好。缺失值不参与比较。"])
+    return "\n".join(lines) + "\n"
+
+
 def _candidate_json(row: dict[str, Any], export_name: str, slot: int, selected: bool, loss: str | None, mode: str) -> dict[str, Any]:
     return {
         "candidate_id": row["candidate_id"],
@@ -365,6 +425,7 @@ def export_flat(
             "group_order": order, "group_prefix": prefix, "uid": uid, "split": split,
             "selected": selected, "selected_name": selected_export, "reason_name": reason_name,
             "wake_text": group_rows[0].get("wake_text"), "lang": group_rows[0].get("lang"),
+            "group_rows": group_rows, "route_result": result,
         })
 
     write_jsonl(root / "ZZZZZZ__EXPORT_INDEX.jsonl", all_index)
@@ -452,6 +513,12 @@ def export_flat(
                 n_se_companion += 1
             else:
                 n_se_missing += 1
+            reason_txt = dest_root / item["split"] / f"{item['uid']}__ROUTE_REASON.txt"
+            reason_txt.parent.mkdir(parents=True, exist_ok=True)
+            reason_txt.write_text(
+                _render_reason_txt(item, item.get("group_rows") or [], item.get("route_result") or {}, selected, companion),
+                encoding="utf-8",
+            )
             selected_index.append({
                 "uid": item["uid"], "split": item["split"],
                 "dest_rel": str(dest.relative_to(dest_root)), "ok": True,
@@ -463,6 +530,7 @@ def export_flat(
                 "source_wav": selected.get("source_wav"),
                 "review_group_prefix": item["group_prefix"],
                 "route_reason_json": item["reason_name"],
+                "route_reason_txt": str(reason_txt.relative_to(dest_root)),
                 "materialize_mode": mode,
                 "se_wav": str(se_dest.relative_to(dest_root)) if se_dest else None,
                 "se_source_wav": companion.get("source_wav") if companion else None,
@@ -482,6 +550,11 @@ def export_flat(
             "n_missing_se": n_se_missing,
             "filename_suffix": "__se.wav",
             "index_fields": ["se_wav", "se_source_wav", "se_candidate_id", "se_pcm_sha256", "se_file_sha256"],
+        }
+        summary["selected_only_reason_format"] = {
+            "human_readable": True,
+            "filename_suffix": "__ROUTE_REASON.txt",
+            "machine_json_kept_in": str(root.resolve()),
         }
         write_json(root / "ZZZZZZ__EXPORT_SUMMARY.json", summary)
     elif selected_only_dir is not None and failures:

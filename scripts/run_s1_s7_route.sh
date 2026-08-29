@@ -26,12 +26,15 @@ SE_COMMAND="${SE_COMMAND:-}"
 SE_BATCH_COMMAND="${SE_BATCH_COMMAND:-}"
 PRECOMPUTED_SE_DIR="${PRECOMPUTED_SE_DIR:-}"
 DEVICE="${DEVICE:-cuda:0}"
-BATCH_SIZE="${BATCH_SIZE:-8}"
+BATCH_SIZE="${BATCH_SIZE:-1}"
 EXPECTED_UIDS="${EXPECTED_UIDS:-1838}"
 RESUME="${RESUME:-1}"
 WITH_NLL="${WITH_NLL:-1}"
+WITH_QWEN_Q1="${WITH_QWEN_Q1:-0}"
 WITH_EMBED="${WITH_EMBED:-0}"
-ASR_CONTEXT_MODE="${ASR_CONTEXT_MODE:-wake}"
+ASR_CONTEXT_MODE="${ASR_CONTEXT_MODE:-none}"
+ASR_CACHE_DIR="${ASR_CACHE_DIR:-/root/autodl-tmp/quick_asr_cache}"
+DURATION_BUCKET_SEC="${DURATION_BUCKET_SEC:-0.5}"
 EXTRACT_SEP_RUN_ID="${EXTRACT_SEP_RUN_ID:-}"
 ALIAS_JSON="${ALIAS_JSON:-$REPO_DIR/configs/english_alias.json}"
 QKW_JSONL="${QKW_JSONL:-}"
@@ -48,7 +51,7 @@ test -d "$POS_NEG/pos"
 test -d "$POS_NEG/neg"
 test -d "$KWS_SRC/kws"
 cd "$REPO_DIR"
-export KWS_SRC DEVICE ASR_MODEL_DIR
+export KWS_SRC DEVICE ASR_MODEL_DIR ASR_CACHE_DIR
 export PYTHONPATH="${REPO_DIR}/src:${KWS_SRC}${PYTHONPATH:+:$PYTHONPATH}"
 
 if [[ "$SE_BACKEND" == "command" && -z "$SE_COMMAND" && -z "$SE_BATCH_COMMAND" ]]; then
@@ -60,7 +63,7 @@ if [[ -z "${ASR_COMMAND:-}" || "$ASR_COMMAND" != *"{manifest}"* || "$ASR_COMMAND
   # placeholder braces as part of the parameter expansion and drops/moves
   # them in the resulting command.  Also replace any inherited malformed
   # command instead of passing it into the pipeline.
-  ASR_COMMAND="python ${REPO_DIR}/scripts/score_asr_manifest.py --manifest {manifest} --output {output} --model-dir ${ASR_MODEL_DIR} --device ${DEVICE} --batch-size ${BATCH_SIZE} --context-mode ${ASR_CONTEXT_MODE}"
+  ASR_COMMAND="python ${REPO_DIR}/scripts/score_asr_manifest.py --manifest {manifest} --output {output} --model-dir ${ASR_MODEL_DIR} --device ${DEVICE} --batch-size ${BATCH_SIZE} --context-mode ${ASR_CONTEXT_MODE} --cache-dir ${ASR_CACHE_DIR} --duration-bucket-sec ${DURATION_BUCKET_SEC}"
 fi
 
 args=(
@@ -130,6 +133,20 @@ status=0
 if [[ ! -f "$WORK_DIR/report.json" ]]; then
   echo "[ERR] quick pipeline failed before report.json was written (status=$status)" >&2
   exit "${status:-1}"
+fi
+
+if [[ "$WITH_QWEN_Q1" == "1" ]]; then
+  q1_args=(
+    --manifest "$WORK_DIR/asr_manifest.jsonl"
+    --output "$WORK_DIR/asr_q1_context.jsonl"
+    --model-dir "$ASR_MODEL_DIR" --device "$DEVICE"
+    --batch-size "$BATCH_SIZE" --context-mode wake --cache-dir "$ASR_CACHE_DIR" --duration-bucket-sec "$DURATION_BUCKET_SEC"
+  )
+  python "${REPO_DIR}/scripts/score_asr_manifest.py" "${q1_args[@]}"
+  python "${REPO_DIR}/scripts/audit_qwen_asr.py" \
+    --manifest "$WORK_DIR/asr_manifest.jsonl" \
+    --free "$WORK_DIR/asr.jsonl" --context "$WORK_DIR/asr_q1_context.jsonl" \
+    --output "$WORK_DIR/qwen_asr_audit.json"
 fi
 
 python - "$WORK_DIR/report.json" "$EXPECTED_UIDS" <<'PY'
